@@ -3,6 +3,8 @@ const db = require('../config/db');
 const redisClient = require('../config/redis');
 const { sendNotification } = require('../utils/notify');
 const { generateHouseholdUrn } = require('../utils/billing');
+const { queueSms } = require('../services/smsService');
+const sms = require('../services/smsTemplates');
 
 // ==================================================================
 // SELF-REGISTRATION (resident side)
@@ -12,14 +14,7 @@ const { generateHouseholdUrn } = require('../utils/billing');
  * POST /households/register
  * Public (or Firebase-authenticated resident).
  * Always creates household with status='Pending'.
- *
- * Body:
- *   estate_id, primary_owner, contact_number, residence_status,
- *   section, court, street,
- *   house_number?, spouse_name?, spouse_contact?,
- *   caretaker_name?, caretaker_contact?,
- *   take_on_balance?,
- *   uid?  (Firebase UID; if missing, a URN is generated)
+ * Fires: registrationSuccessful (to resident), new-registration alert (to officials)
  */
 exports.registerHousehold = async (req, res) => {
   const {
@@ -36,10 +31,9 @@ exports.registerHousehold = async (req, res) => {
     caretaker_name = null,
     caretaker_contact = null,
     take_on_balance = 0,
-    uid = null,          // Firebase UID if the resident is already signed in
+    uid = null,
   } = req.body;
 
-  // ----- Validation (per Makaazi.docx §2.2) -----
   const missing = [];
   if (!estate_id)        missing.push('estate_id');
   if (!primary_owner)    missing.push('primary_owner');
@@ -67,7 +61,7 @@ exports.registerHousehold = async (req, res) => {
   }
 
   try {
-    // 1. Estate exists + grab URN prefix
+    // 1. Estate exists
     const [estates] = await db.promise().query(
       `SELECT estate_id, estate_urn, estate_name
        FROM estates WHERE estate_id = ? LIMIT 1`,
@@ -78,7 +72,7 @@ exports.registerHousehold = async (req, res) => {
     }
     const estate = estates[0];
 
-    // 2. Prevent duplicate phone within estate
+    // 2. Duplicate phone check
     const [dupe] = await db.promise().query(
       `SELECT household_id, status FROM households
        WHERE contact_number = ? AND estate_id = ? LIMIT 1`,
@@ -93,7 +87,7 @@ exports.registerHousehold = async (req, res) => {
       return res.status(409).json({ error: msg, existing_status: s });
     }
 
-    // 3. Generate URN (retry on collision)
+    // 3. URN generation
     let householdUrn = uid;
     if (!householdUrn) {
       let collision = true;
@@ -111,15 +105,12 @@ exports.registerHousehold = async (req, res) => {
         return res.status(500).json({ error: 'Failed to generate unique URN' });
       }
     } else {
-      // If a Firebase UID was supplied, ensure it's not already used
       const [uidTaken] = await db.promise().query(
         `SELECT 1 FROM households WHERE uid = ? LIMIT 1`,
         [uid]
       );
       if (uidTaken.length) {
-        return res.status(409).json({
-          error: 'This account is already registered',
-        });
+        return res.status(409).json({ error: 'This account is already registered' });
       }
     }
 
@@ -141,23 +132,76 @@ exports.registerHousehold = async (req, res) => {
     ];
     const [result] = await db.promise().query(insertSql, values);
 
-    // 5. Notify estate officials
+    // 5. In-app notifications to officials
     const [officials] = await db.promise().query(
-      `SELECT uid, full_name FROM officials WHERE estate_id = ?`,
+      `SELECT uid, full_name, contact_number FROM officials WHERE estate_id = ?`,
       [estate_id]
     );
     for (const off of officials) {
-      await sendNotification({
-        user_uid: off.uid,
-        user_type: 'USER',
-        title: 'New Household Registration',
-        message: `${primary_owner} (${section} / ${court} / ${street}) has requested to join ${estate.estate_name}.`,
-        type: 'ACCOUNT',
-      });
+      try {
+        await sendNotification({
+          user_uid: off.uid,
+          user_type: 'USER',
+          title: 'New Household Registration',
+          message: `${primary_owner} (${section} / ${court} / ${street}) has requested to join ${estate.estate_name}.`,
+          type: 'ACCOUNT',
+        });
+      } catch (e) {
+        console.warn('Officials notification failed:', e.message);
+      }
     }
 
-    // 6. Invalidate pending cache
+    // 6. Invalidate cache
     await redisClient.del(`estate:${estate_id}:pending`);
+
+    // ---- SMS (fire-and-forget) ----
+    (async () => {
+      try {
+        // A. Confirm to the resident
+        if (contact_number) {
+          const res1 = await queueSms(
+            contact_number,
+            sms.registrationSuccessful({
+              name: (primary_owner || 'Resident').split(' ')[0],
+              estateName: estate.estate_name,
+              houseNumber: house_number,
+              section,
+              court,
+              street,
+            }),
+            {
+              user_uid: householdUrn,
+              estate_id,
+              kind: 'registration_successful',
+            }
+          );
+          console.log('🟢 registrationSuccessful →', res1);
+        }
+
+        // B. Alert each official
+        const addr = [house_number && `Hs ${house_number}`, section, court, street]
+          .filter(Boolean)
+          .join(' / ');
+
+        for (const off of officials) {
+          if (!off.contact_number) continue;
+          const res2 = await queueSms(
+            off.contact_number,
+            `Hi ${(off.full_name || 'Official').split(' ')[0]}, ${primary_owner} (${
+              addr || 'no address'
+            }) has requested to join ${estate.estate_name}. Open Makaazi to approve.`,
+            {
+              estate_id,
+              kind: 'new_registration_for_official',
+            }
+          );
+          console.log('🟢 newRegistrationForOfficial →', res2);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      } catch (e) {
+        console.warn('registerHousehold SMS failed:', e.message);
+      }
+    })();
 
     return res.status(201).json({
       message: 'Registration submitted. Awaiting official approval.',
@@ -173,11 +217,9 @@ exports.registerHousehold = async (req, res) => {
 
 /**
  * GET /households/registration-status/:uid
- * Resident polls this to know if they've been approved/rejected.
  */
 exports.getRegistrationStatus = async (req, res) => {
   const { uid } = req.params;
-
   try {
     const [rows] = await db.promise().query(
       `SELECT household_id, uid, primary_owner, status,
@@ -198,11 +240,6 @@ exports.getRegistrationStatus = async (req, res) => {
 // ==================================================================
 // OFFICIAL-SIDE: LIST PENDING
 // ==================================================================
-
-/**
- * GET /households/estate/:estateId/pending
- * Official-only. Lists all Pending households in the estate.
- */
 exports.getPendingHouseholds = async (req, res) => {
   const { estateId } = req.params;
   const cacheKey = `estate:${estateId}:pending`;
@@ -232,12 +269,12 @@ exports.getPendingHouseholds = async (req, res) => {
 };
 
 // ==================================================================
-// OFFICIAL-SIDE: APPROVE / REJECT
+// OFFICIAL-SIDE: APPROVE
 // ==================================================================
-
 /**
  * POST /households/:householdId/approve
  * Body: { official_uid }
+ * Fires: householdApproved (to resident)
  */
 exports.approveHousehold = async (req, res) => {
   const { householdId } = req.params;
@@ -259,7 +296,7 @@ exports.approveHousehold = async (req, res) => {
       return res.status(200).json({ message: 'Already approved' });
     }
 
-    // Verify official belongs to same estate
+    // Verify official
     const [oRows] = await db.promise().query(
       `SELECT official_id, full_name FROM officials
        WHERE uid = ? AND estate_id = ? LIMIT 1`,
@@ -270,7 +307,7 @@ exports.approveHousehold = async (req, res) => {
     }
     const official = oRows[0];
 
-    // Transaction: approve + seed household_payments row
+    // Transaction: approve + seed household_payments
     const connection = await db.promise().getConnection();
     try {
       await connection.beginTransaction();
@@ -331,14 +368,48 @@ exports.approveHousehold = async (req, res) => {
       redisClient.del(`dashboard:${household.uid}`),
     ]);
 
-    // Notify resident
-    await sendNotification({
-      user_uid: household.uid,
-      user_type: 'USER',
-      title: 'Registration Approved',
-      message: `Welcome! Your registration for ${household.section} / ${household.court} is approved.`,
-      type: 'ACCOUNT',
-    });
+    // In-app notification
+    try {
+      await sendNotification({
+        user_uid: household.uid,
+        user_type: 'USER',
+        title: 'Registration Approved',
+        message: `Welcome! Your registration for ${household.section} / ${household.court} is approved.`,
+        type: 'ACCOUNT',
+      });
+    } catch (e) {
+      console.warn('Approval notification failed:', e.message);
+    }
+
+    // ---- SMS (fire-and-forget) ----
+    (async () => {
+      try {
+        if (household.contact_number) {
+          const [[est]] = await db.promise().query(
+            `SELECT estate_name FROM estates WHERE estate_id = ?`,
+            [estateId]
+          );
+
+          const result = await queueSms(
+            household.contact_number,
+            sms.householdApproved({
+              name: (household.primary_owner || 'Resident').split(' ')[0],
+              estateName: est?.estate_name || 'your estate',
+              urn: household.uid,
+              takeOnBalance: household.take_on_balance,
+            }),
+            {
+              user_uid: household.uid,
+              estate_id: estateId,
+              kind: 'household_approved',
+            }
+          );
+          console.log('🟢 householdApproved →', result);
+        }
+      } catch (e) {
+        console.warn('Approval SMS failed:', e.message);
+      }
+    })();
 
     return res.json({
       message: 'Household approved',
@@ -353,9 +424,13 @@ exports.approveHousehold = async (req, res) => {
   }
 };
 
+// ==================================================================
+// OFFICIAL-SIDE: REJECT
+// ==================================================================
 /**
  * POST /households/:householdId/reject
  * Body: { official_uid, reason }
+ * Fires: registrationRejected (to resident)
  */
 exports.rejectHousehold = async (req, res) => {
   const { householdId } = req.params;
@@ -396,13 +471,44 @@ exports.rejectHousehold = async (req, res) => {
       redisClient.del(`household:pk:${household.household_id}`),
     ]);
 
-    await sendNotification({
-      user_uid: household.uid,
-      user_type: 'USER',
-      title: 'Registration Rejected',
-      message: `Your registration was rejected: ${reason}`,
-      type: 'ACCOUNT',
-    });
+    try {
+      await sendNotification({
+        user_uid: household.uid,
+        user_type: 'USER',
+        title: 'Registration Rejected',
+        message: `Your registration was rejected: ${reason}`,
+        type: 'ACCOUNT',
+      });
+    } catch (e) {
+      console.warn('Rejection notification failed:', e.message);
+    }
+
+    // ---- SMS (fire-and-forget) ----
+    (async () => {
+      try {
+        if (household.contact_number) {
+          const [[est]] = await db.promise().query(
+            `SELECT estate_name FROM estates WHERE estate_id = ?`,
+            [household.estate_id]
+          );
+
+          const result = await queueSms(
+            household.contact_number,
+            `Hi ${(household.primary_owner || 'Applicant').split(' ')[0]}, your registration at ${
+              est?.estate_name || 'the estate'
+            } was not approved. Reason: ${reason}. Contact your estate officials for more info. - Makaazi`,
+            {
+              user_uid: household.uid,
+              estate_id: household.estate_id,
+              kind: 'registration_rejected',
+            }
+          );
+          console.log('🟢 registrationRejected →', result);
+        }
+      } catch (e) {
+        console.warn('Rejection SMS failed:', e.message);
+      }
+    })();
 
     return res.json({ message: 'Household rejected' });
   } catch (err) {
