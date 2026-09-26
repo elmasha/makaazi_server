@@ -3,9 +3,11 @@ const db = require('../config/db');
 const redisClient = require('../config/redis');
 const { generateHouseholdUrn } = require('../utils/billing');
 const { sendNotification } = require('../utils/notify');
+const { queueSms } = require('../services/smsService');
+const sms = require('../services/smsTemplates');
 
 // ------------------------------------------------------------------
-// Cache keys — consistent across read/write for clean invalidation
+// Cache keys
 // ------------------------------------------------------------------
 const CACHE = {
   all:                'households:all',
@@ -43,6 +45,18 @@ function normalizeBool(v) {
   return null;
 }
 
+async function fetchEstateName(estateId) {
+  try {
+    const [[row]] = await db.promise().query(
+      `SELECT estate_name FROM estates WHERE estate_id = ?`,
+      [estateId]
+    );
+    return row?.estate_name || 'your estate';
+  } catch {
+    return 'your estate';
+  }
+}
+
 // ==================================================================
 // READS
 // ==================================================================
@@ -50,10 +64,7 @@ function normalizeBool(v) {
 // GET /households/by-address?estate_id=&section=&street=&court=
 exports.getHouseholdsByAddress = async (req, res) => {
   const { estate_id, section, street, court } = req.query;
-
-  if (!estate_id) {
-    return res.status(400).json({ error: 'estate_id is required' });
-  }
+  if (!estate_id) return res.status(400).json({ error: 'estate_id is required' });
 
   const cacheKey = CACHE.byAddress(estate_id, section, street, court);
 
@@ -63,7 +74,6 @@ exports.getHouseholdsByAddress = async (req, res) => {
 
     const conditions = ["estate_id = ?", "status = 'Approved'"];
     const values = [estate_id];
-
     if (section) { conditions.push('section = ?'); values.push(section); }
     if (street)  { conditions.push('street = ?');  values.push(street); }
     if (court)   { conditions.push('court = ?');   values.push(court); }
@@ -86,7 +96,6 @@ exports.getHouseholdsByAddress = async (req, res) => {
   }
 };
 
-// GET /households
 exports.getAllHouseholds = async (req, res) => {
   try {
     const cached = await redisClient.get(CACHE.all);
@@ -103,7 +112,6 @@ exports.getAllHouseholds = async (req, res) => {
   }
 };
 
-// GET /households/getHouseHoldId/:uid  ← resolve by Firebase UID
 exports.getHouseholdByUid = async (req, res) => {
   const { uid } = req.params;
   const cacheKey = CACHE.byUid(uid);
@@ -116,9 +124,8 @@ exports.getHouseholdByUid = async (req, res) => {
       `SELECT * FROM households WHERE uid = ? LIMIT 1`,
       [uid]
     );
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Household not found' });
-    }
+    if (!rows.length) return res.status(404).json({ message: 'Household not found' });
+
     await redisClient.setEx(cacheKey, 300, JSON.stringify(rows[0]));
     return res.json(rows[0]);
   } catch (err) {
@@ -127,7 +134,6 @@ exports.getHouseholdByUid = async (req, res) => {
   }
 };
 
-// GET /households/getHousehold/:id  ← resolve by primary key
 exports.getHouseholdById = async (req, res) => {
   const { id } = req.params;
   const cacheKey = CACHE.byPk(id);
@@ -140,9 +146,8 @@ exports.getHouseholdById = async (req, res) => {
       `SELECT * FROM households WHERE household_id = ? LIMIT 1`,
       [id]
     );
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Household not found' });
-    }
+    if (!rows.length) return res.status(404).json({ message: 'Household not found' });
+
     await redisClient.setEx(cacheKey, 300, JSON.stringify(rows[0]));
     return res.json(rows[0]);
   } catch (err) {
@@ -151,7 +156,6 @@ exports.getHouseholdById = async (req, res) => {
   }
 };
 
-// GET /households/getHouseHoldByPhone/:estateId/:phone
 exports.getHouseholdByPhone = async (req, res) => {
   const { estateId, phone } = req.params;
   const cacheKey = CACHE.byPhone(estateId, phone);
@@ -166,9 +170,8 @@ exports.getHouseholdByPhone = async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [phone, estateId]
     );
-    if (!rows.length) {
-      return res.status(404).json({ message: 'Household not found' });
-    }
+    if (!rows.length) return res.status(404).json({ message: 'Household not found' });
+
     await redisClient.setEx(cacheKey, 300, JSON.stringify(rows[0]));
     return res.json(rows[0]);
   } catch (err) {
@@ -177,11 +180,9 @@ exports.getHouseholdByPhone = async (req, res) => {
   }
 };
 
-// GET /households/searchEstate/:id?query=
 exports.searchHouseholdsId = async (req, res) => {
   const { id } = req.params;
   const { query } = req.query;
-
   if (!query) return res.status(400).json({ error: 'Search query is required' });
 
   const cacheKey = CACHE.searchEstate(id, query);
@@ -210,7 +211,6 @@ exports.searchHouseholdsId = async (req, res) => {
   }
 };
 
-// GET /households/search?query=
 exports.searchHouseholds = async (req, res) => {
   const { query } = req.query;
   if (!query) return res.status(400).json({ error: 'Search query is required' });
@@ -240,12 +240,9 @@ exports.searchHouseholds = async (req, res) => {
   }
 };
 
-// GET /households/getActiveaddHouseHold/:active
 exports.getActiveHouseHolds = async (req, res) => {
   const flag = normalizeBool(req.params.active);
-  if (flag === null) {
-    return res.status(400).json({ error: 'active must be 0 or 1' });
-  }
+  if (flag === null) return res.status(400).json({ error: 'active must be 0 or 1' });
 
   const cacheKey = CACHE.active(flag);
 
@@ -267,7 +264,6 @@ exports.getActiveHouseHolds = async (req, res) => {
   }
 };
 
-// GET /households/getActiveEstate/:active/:estate_id
 exports.getActiveEstate = async (req, res) => {
   const flag = normalizeBool(req.params.active);
   const { estate_id } = req.params;
@@ -295,12 +291,9 @@ exports.getActiveEstate = async (req, res) => {
   }
 };
 
-// GET /households/getOfficials/:is_official
 exports.getOfficials = async (req, res) => {
   const flag = normalizeBool(req.params.is_official);
-  if (flag === null) {
-    return res.status(400).json({ error: 'is_official must be 0 or 1' });
-  }
+  if (flag === null) return res.status(400).json({ error: 'is_official must be 0 or 1' });
 
   const cacheKey = CACHE.officials(flag);
 
@@ -322,7 +315,6 @@ exports.getOfficials = async (req, res) => {
   }
 };
 
-// GET /households/getBHsHldEstId/:id  ← approved households by estate
 exports.getHsHlByEstateId = async (req, res) => {
   const { id } = req.params;
   const cacheKey = CACHE.byEstate(id);
@@ -348,14 +340,9 @@ exports.getHsHlByEstateId = async (req, res) => {
 // ==================================================================
 // HOUSEHOLD PAYMENTS (per-household transaction log)
 // ==================================================================
-
-// GET /households/:householdId/payments
 exports.getHouseholdPayments = async (req, res) => {
   const { householdId } = req.params;
-
-  if (!householdId) {
-    return res.status(400).json({ error: 'householdId is required' });
-  }
+  if (!householdId) return res.status(400).json({ error: 'householdId is required' });
 
   try {
     const [rows] = await db.promise().query(
@@ -367,7 +354,6 @@ exports.getHouseholdPayments = async (req, res) => {
        ORDER BY payment_date DESC, payment_id DESC`,
       [householdId]
     );
-
     return res.json(rows);
   } catch (err) {
     console.error('getHouseholdPayments error:', err.message);
@@ -376,19 +362,14 @@ exports.getHouseholdPayments = async (req, res) => {
 };
 
 // ==================================================================
-// ESTATE HOUSEHOLD LIST (official payment summary table)
-// GET /households/estate/:estateId/households/list?year=YYYY
+// ESTATE HOUSEHOLD LIST
 // ==================================================================
 exports.getEstateHouseholdList = async (req, res) => {
   const { estateId } = req.params;
   const year = parseInt(req.query.year) || new Date().getFullYear();
-
-  if (!estateId) {
-    return res.status(400).json({ error: 'estateId is required' });
-  }
+  if (!estateId) return res.status(400).json({ error: 'estateId is required' });
 
   try {
-    // 1. Sum monthly-frequency charges for this estate
     const [rates] = await db.promise().query(
       `SELECT COALESCE(SUM(amount), 0) AS rate
        FROM service_charges
@@ -398,7 +379,6 @@ exports.getEstateHouseholdList = async (req, res) => {
     const monthlyRate = Number(rates[0]?.rate || 0);
     const monthsElapsed = new Date().getMonth() + 1;
 
-    // 2. Pull every approved household + their payment row
     const [rows] = await db.promise().query(
       `SELECT
          h.household_id, h.uid, h.primary_owner, h.contact_number, h.house_number,
@@ -416,7 +396,6 @@ exports.getEstateHouseholdList = async (req, res) => {
       [year, estateId]
     );
 
-    // 3. Compute status + shape response
     const results = rows.map((r) => {
       const bf = Number(r.bf || 0);
       const paid = Number(r.total_paid || 0);
@@ -467,16 +446,11 @@ exports.getEstateHouseholdList = async (req, res) => {
 };
 
 // ==================================================================
-// ADDRESS DROPDOWNS (registration + filters)
+// ADDRESS DROPDOWNS
 // ==================================================================
-
-// GET /households/address-dropdowns/:estate_id
 exports.getAddressDropdowns = async (req, res) => {
   const { estate_id } = req.params;
-
-  if (!estate_id) {
-    return res.status(400).json({ error: 'estate_id is required' });
-  }
+  if (!estate_id) return res.status(400).json({ error: 'estate_id is required' });
 
   const cacheKey = CACHE.dropdowns(estate_id);
 
@@ -486,20 +460,17 @@ exports.getAddressDropdowns = async (req, res) => {
 
     const [sections] = await db.promise().query(
       `SELECT section_name FROM estate_sections
-       WHERE estate_id = ? AND active = 1
-       ORDER BY section_name`,
+       WHERE estate_id = ? AND active = 1 ORDER BY section_name`,
       [estate_id]
     );
     const [courts] = await db.promise().query(
       `SELECT court_name FROM estate_courts
-       WHERE estate_id = ? AND active = 1
-       ORDER BY court_name`,
+       WHERE estate_id = ? AND active = 1 ORDER BY court_name`,
       [estate_id]
     );
     const [streets] = await db.promise().query(
       `SELECT street_name FROM estate_streets
-       WHERE estate_id = ? AND active = 1
-       ORDER BY street_name`,
+       WHERE estate_id = ? AND active = 1 ORDER BY street_name`,
       [estate_id]
     );
 
@@ -518,25 +489,17 @@ exports.getAddressDropdowns = async (req, res) => {
   }
 };
 
-// GET /households/address-config/:estate_id
 exports.getEstateAddressConfig = async (req, res) => {
   const { estate_id } = req.params;
-
   try {
     const [rows] = await db.promise().query(
       `SELECT show_street, show_section, show_court
        FROM estate_address_config WHERE estate_id = ? LIMIT 1`,
       [estate_id]
     );
-
     if (!rows.length) {
-      return res.json({
-        show_street: true,
-        show_section: true,
-        show_court: true,
-      });
+      return res.json({ show_street: true, show_section: true, show_court: true });
     }
-
     return res.json(rows[0]);
   } catch (err) {
     console.error('getEstateAddressConfig error:', err.message);
@@ -549,6 +512,7 @@ exports.getEstateAddressConfig = async (req, res) => {
 // ==================================================================
 
 // POST /households/addHousehold
+// Fires: registrationSuccessful (to resident) + new-registration alert (to officials)
 exports.createHousehold = async (req, res) => {
   const {
     estate_id, primary_owner, spouse_name = null, caretaker_name = null,
@@ -581,18 +545,14 @@ exports.createHousehold = async (req, res) => {
   }
 
   const tob = Number(take_on_balance) || 0;
-  if (tob < 0) {
-    return res.status(400).json({ error: 'take_on_balance must be >= 0' });
-  }
+  if (tob < 0) return res.status(400).json({ error: 'take_on_balance must be >= 0' });
 
   try {
     const [estates] = await db.promise().query(
       `SELECT estate_id, estate_urn FROM estates WHERE estate_id = ? LIMIT 1`,
       [estate_id]
     );
-    if (!estates.length) {
-      return res.status(404).json({ error: 'Estate not found' });
-    }
+    if (!estates.length) return res.status(404).json({ error: 'Estate not found' });
 
     const [dupe] = await db.promise().query(
       `SELECT household_id FROM households
@@ -658,6 +618,59 @@ exports.createHousehold = async (req, res) => {
 
     await invalidateHouseholdCaches(estate_id, result.insertId, householdUrn);
 
+    // ---- SMS (fire-and-forget) ----
+    (async () => {
+      try {
+        const estateName = await fetchEstateName(estate_id);
+
+        // 1. Confirmation SMS to the resident who registered
+        if (contact_number) {
+          await queueSms(
+            contact_number,
+            sms.registrationSuccessful({
+              name: (primary_owner || 'Resident').split(' ')[0],
+              estateName,
+              houseNumber: house_number,
+              section,
+              court,
+              street,
+            }),
+            {
+              user_uid: householdUrn,
+              estate_id,
+              kind: 'registration_successful',
+            }
+          );
+        }
+
+        // 2. Alert every official of this estate
+        const [officials] = await db.promise().query(
+          `SELECT full_name, contact_number
+           FROM officials
+           WHERE estate_id = ? AND contact_number IS NOT NULL`,
+          [estate_id]
+        );
+
+        const addr = [house_number && `Hs ${house_number}`, section, court, street]
+          .filter(Boolean)
+          .join(' / ');
+
+        for (const o of officials) {
+          const msg = `Hi ${(o.full_name || 'Official').split(' ')[0]}, ${primary_owner} (${
+            addr || 'no address'
+          }) has been added to ${estateName}. Open Makaazi to view.`;
+
+          await queueSms(o.contact_number, msg, {
+            estate_id,
+            kind: 'new_registration_for_official',
+          });
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      } catch (e) {
+        console.warn('createHousehold SMS failed:', e.message);
+      }
+    })();
+
     return res.status(201).json({
       message: 'Household created successfully',
       householdId: result.insertId,
@@ -671,29 +684,200 @@ exports.createHousehold = async (req, res) => {
 };
 
 // POST /households/updateRoles/:id
+// Fires: officialAssigned (household → official) OR officialPromoted (role change)
 exports.updateHouseholdRoles = async (req, res) => {
   const { household_id, is_official, official_role } = req.body;
   if (!household_id) return res.status(400).json({ error: 'household_id is required' });
 
   try {
+    // 1. Get current state BEFORE updating (to detect the transition)
+    const [[before]] = await db.promise().query(
+      `SELECT household_id, estate_id, uid, primary_owner, contact_number,
+              is_official, official_role
+       FROM households WHERE household_id = ?`,
+      [household_id]
+    );
+    if (!before) return res.status(404).json({ error: 'Household not found' });
+
+    const newOfficial = is_official ? 1 : 0;
+
+    // 2. Apply the change
     const [result] = await db.promise().query(
       `UPDATE households SET is_official = ?, official_role = ?
        WHERE household_id = ?`,
-      [is_official ? 1 : 0, official_role || null, household_id]
+      [newOfficial, official_role || null, household_id]
     );
     if (!result.affectedRows) {
       return res.status(404).json({ error: 'Household not found' });
     }
 
-    const [[h]] = await db.promise().query(
-      `SELECT estate_id, uid FROM households WHERE household_id = ?`,
-      [household_id]
-    );
-    if (h) await invalidateHouseholdCaches(h.estate_id, household_id, h.uid);
+    await invalidateHouseholdCaches(before.estate_id, household_id, before.uid);
+
+    // ---- SMS (fire-and-forget) ----
+    (async () => {
+      try {
+        const estateName = await fetchEstateName(before.estate_id);
+
+        const becomingOfficial = !before.is_official && newOfficial === 1;
+        const roleChanged =
+          before.is_official === 1 &&
+          newOfficial === 1 &&
+          before.official_role !== (official_role || null);
+
+        if (becomingOfficial && before.contact_number) {
+          await queueSms(
+            before.contact_number,
+            sms.officialAssigned({
+              name: (before.primary_owner || 'Resident').split(' ')[0],
+              role: official_role || 'Official',
+              estateName,
+            }),
+            {
+              user_uid: before.uid,
+              estate_id: before.estate_id,
+              kind: 'official_assigned',
+            }
+          );
+        } else if (roleChanged && before.contact_number) {
+          await queueSms(
+            before.contact_number,
+            sms.officialPromoted({
+              name: (before.primary_owner || 'Official').split(' ')[0],
+              oldRole: before.official_role,
+              newRole: official_role || 'Official',
+              estateName,
+            }),
+            {
+              user_uid: before.uid,
+              estate_id: before.estate_id,
+              kind: 'official_promoted',
+            }
+          );
+        }
+      } catch (e) {
+        console.warn('Role-change SMS failed:', e.message);
+      }
+    })();
 
     return res.json({ message: 'Household roles updated' });
   } catch (err) {
     console.error('updateHouseholdRoles error:', err.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// NEW: POST /households/approve/:id
+// Fires: householdApproved
+exports.approveHousehold = async (req, res) => {
+  const { id } = req.params;
+  const { official_id, status, rejection_reason } = req.body;
+
+  if (!official_id || !status) {
+    return res.status(400).json({ error: 'official_id and status are required' });
+  }
+  if (!['Approved', 'Rejected'].includes(status)) {
+    return res.status(400).json({ error: 'status must be "Approved" or "Rejected"' });
+  }
+
+  try {
+    const [[official]] = await db.promise().query(
+      'SELECT estate_id FROM officials WHERE official_id = ?',
+      [official_id]
+    );
+    const [[hh]] = await db.promise().query(
+      'SELECT estate_id FROM households WHERE household_id = ?',
+      [id]
+    );
+
+    if (!official) return res.status(404).json({ error: 'Official not found' });
+    if (!hh) return res.status(404).json({ error: 'Household not found' });
+    if (official.estate_id !== hh.estate_id) {
+      return res.status(403).json({ error: 'Cannot approve households outside your estate' });
+    }
+
+    const [result] = await db.promise().query(
+      `UPDATE households
+       SET status = ?, approved_by = ?, approved_at = NOW(), rejection_reason = ?
+       WHERE household_id = ? AND status = 'Pending'`,
+      [
+        status,
+        official_id,
+        status === 'Rejected' ? rejection_reason || 'No reason provided' : null,
+        id,
+      ]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(400).json({ error: 'Household is not Pending' });
+    }
+
+    await invalidateHouseholdCaches(hh.estate_id, id, null);
+
+    // ---- SMS (fire-and-forget) ----
+    if (status === 'Approved') {
+      (async () => {
+        try {
+          const [[row]] = await db.promise().query(
+            `SELECT primary_owner, contact_number, uid, take_on_balance
+             FROM households WHERE household_id = ?`,
+            [id]
+          );
+          const estateName = await fetchEstateName(hh.estate_id);
+
+          if (row?.contact_number) {
+            await queueSms(
+              row.contact_number,
+              sms.householdApproved({
+                name: (row.primary_owner || 'Resident').split(' ')[0],
+                estateName,
+                urn: row.uid,
+                takeOnBalance: row.take_on_balance,
+              }),
+              {
+                user_uid: row.uid,
+                estate_id: hh.estate_id,
+                kind: 'household_approved',
+              }
+            );
+          }
+        } catch (e) {
+          console.warn('Approval SMS failed:', e.message);
+        }
+      })();
+    }
+
+    // Rejection SMS (optional but included)
+    if (status === 'Rejected') {
+      (async () => {
+        try {
+          const [[row]] = await db.promise().query(
+            `SELECT primary_owner, contact_number, uid, rejection_reason
+             FROM households WHERE household_id = ?`,
+            [id]
+          );
+          const estateName = await fetchEstateName(hh.estate_id);
+
+          if (row?.contact_number) {
+            const reason = row.rejection_reason ? ` Reason: ${row.rejection_reason}.` : '';
+            await queueSms(
+              row.contact_number,
+              `Hi ${(row.primary_owner || 'Applicant').split(' ')[0]}, your registration at ${estateName} was not approved.${reason} Contact your estate officials for more info. - Makaazi`,
+              {
+                user_uid: row.uid,
+                estate_id: hh.estate_id,
+                kind: 'registration_rejected',
+              }
+            );
+          }
+        } catch (e) {
+          console.warn('Rejection SMS failed:', e.message);
+        }
+      })();
+    }
+
+    return res.status(200).json({ message: `Household ${status.toLowerCase()} successfully.` });
+  } catch (err) {
+    console.error('approveHousehold error:', err.message);
     return res.status(500).json({ error: 'Server error' });
   }
 };
@@ -706,10 +890,7 @@ exports.existingHousehold = async (req, res) => {
   try {
     let sql = `SELECT household_id FROM households WHERE contact_number = ?`;
     const params = [phone];
-    if (estate_id) {
-      sql += ` AND estate_id = ?`;
-      params.push(estate_id);
-    }
+    if (estate_id) { sql += ` AND estate_id = ?`; params.push(estate_id); }
     sql += ` LIMIT 1`;
 
     const [rows] = await db.promise().query(sql, params);
@@ -731,9 +912,7 @@ exports.updateHousehold = async (req, res) => {
   const fields = req.body;
 
   if (!id) return res.status(400).json({ error: 'household ID is required' });
-  if (!Object.keys(fields).length) {
-    return res.status(400).json({ error: 'No fields to update' });
-  }
+  if (!Object.keys(fields).length) return res.status(400).json({ error: 'No fields to update' });
 
   const blocked = ['household_id', 'uid', 'created_at', 'approved_by', 'approved_at'];
   for (const k of blocked) delete fields[k];
@@ -750,9 +929,7 @@ exports.updateHousehold = async (req, res) => {
       `UPDATE households SET ${setters} WHERE household_id = ?`,
       values
     );
-    if (!result.affectedRows) {
-      return res.status(404).json({ error: 'Household not found' });
-    }
+    if (!result.affectedRows) return res.status(404).json({ error: 'Household not found' });
 
     const [[h]] = await db.promise().query(
       `SELECT estate_id, uid FROM households WHERE household_id = ?`,
@@ -778,11 +955,7 @@ exports.deleteHousehold = async (req, res) => {
     );
     if (!h) return res.status(404).json({ error: 'Household not found' });
 
-    await db.promise().query(
-      `DELETE FROM households WHERE household_id = ?`,
-      [id]
-    );
-
+    await db.promise().query(`DELETE FROM households WHERE household_id = ?`, [id]);
     await invalidateHouseholdCaches(h.estate_id, id, h.uid);
     return res.json({ message: 'Household deleted successfully' });
   } catch (err) {

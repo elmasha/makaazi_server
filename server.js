@@ -22,7 +22,9 @@ app.get('/', (req, res) => {
   
   res.send('Welcome to Makaazi Estate Management API');
 });
-
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/dev', require('./routes/dev'));
+}
 // Import Routes
 app.use('/payment/', require('./payments/mpesaStkPush'))
 app.use('/api/roles', require('./routes/roles'));
