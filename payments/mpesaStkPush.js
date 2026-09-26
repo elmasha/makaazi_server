@@ -4,6 +4,8 @@ const router = express.Router();
 const request = require('request');
 const db = require('../config/db');
 const { sendNotification } = require('../utils/notify');
+const { queueSms } = require('../services/smsService');
+const sms = require('../services/smsTemplates');
 
 // ============================================================
 // CONFIG
@@ -340,6 +342,7 @@ router.post('/stk_callback', async (req, res) => {
     console.error('⚠️ household_payments update failed:', err.message);
   }
 
+  // ---- In-app notification ----
   try {
     await sendNotification({
       user_uid: pending.uid || String(pending.household_id),
@@ -351,6 +354,56 @@ router.post('/stk_callback', async (req, res) => {
   } catch (err) {
     console.warn('⚠️ Notification failed:', err.message);
   }
+
+  // ---- SMS: payment receipt to resident (fire-and-forget) ----
+  (async () => {
+    try {
+      const [[hh]] = await db.promise().query(
+        `SELECT primary_owner, contact_number, uid
+         FROM households WHERE household_id = ?`,
+        [pending.household_id]
+      );
+      const [[est]] = await db.promise().query(
+        `SELECT estate_name FROM estates WHERE estate_id = ?`,
+        [pending.estate_id]
+      );
+      const [[pay]] = await db.promise().query(
+        `SELECT total_paid, due_year_to_date
+         FROM household_payments
+         WHERE household_id = ? AND year = YEAR(CURDATE())
+         LIMIT 1`,
+        [pending.household_id]
+      );
+
+      if (hh?.contact_number) {
+        const outstanding = Math.max(
+          0,
+          Number(pay?.due_year_to_date || 0) - Number(pay?.total_paid || 0)
+        );
+
+        const result = await queueSms(
+          hh.contact_number,
+          sms.paymentSuccessful({
+            name: (hh.primary_owner || 'Resident').split(' ')[0],
+            amount: amount || pending.amount,
+            receipt: transID,
+            estateName: est?.estate_name || 'your estate',
+            balance: outstanding,
+          }),
+          {
+            user_uid: hh.uid,
+            estate_id: pending.estate_id,
+            kind: 'payment_successful',
+          }
+        );
+        console.log('🟢 paymentSuccessful →', result);
+      } else {
+        console.warn('⚠️ No contact_number for household', pending.household_id);
+      }
+    } catch (e) {
+      console.warn('Payment SMS failed:', e.message);
+    }
+  })();
 
   return res.status(200).json({ message: 'Payment saved successfully' });
 });
