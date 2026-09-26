@@ -1,23 +1,65 @@
 const express = require('express');
 const router = express.Router();
-const { getAllEstates,createEstateConfig ,createEstate,checkAndDisableEstateSubscription,checkEstateDue,updateEstate,searchEstates,getBillingMessage,deleteEstate,getEstateById,searchAllEstates,getEstateByName,subscription,getEstateSubById,checkDueSubscriptions } = require('../controllers/estatesController');
 
-router.get('/getall', getAllEstates);    // Get all estates
-router.post('/create', createEstate);    // Create a new estate
-router.post('/create-config', createEstateConfig);    // Create a new estate
-router.patch('/update_estates/:id', updateEstate);// update estate
-router.put('/delete_estates/:id', deleteEstate);// delete estate
-router.get('/search', searchEstates);// search estate
-router.get('/searchAll', searchAllEstates);// search all estate
-router.get('/estate/:id', getEstateById);// get estate by id 
-router.get('/estate-due-disable/:estate_id', checkAndDisableEstateSubscription);// get estate b
-router.get('/estate-due/:estate_id', checkEstateDue);// get estate by id 
-router.get('/estate-sub-msg/:estate_id', getBillingMessage);// get estate by id 
-router.get('/estate-sub/:id', getEstateSubById);// get estate by id 
-router.get('/estate-check-sub/:id', checkDueSubscriptions);// get estate by id 
-router.get('/estateName/:id', getEstateByName);// get estate by id
-router.post('/subscription', subscription);// get estate by id
+const {
+  // READ
+  getAllEstates,
+  getEstateById,
+  getEstateByName,
+  getEstateSubById,
 
+  // WRITE
+  createEstate,
+  createEstateConfig, // deprecated but kept
+  updateEstate,
+  deleteEstate,
 
+  // SEARCH
+  searchEstates,
+  searchAllEstates, // deprecated alias
+
+  // SUBSCRIPTION
+  subscription,
+  checkEstateDue,
+  getBillingMessage,
+  checkDueSubscriptions,
+  checkAndDisableEstateSubscription,
+} = require('../controllers/estatesController');
+
+// ============================================================
+// LIST & SEARCH
+// ============================================================
+router.get('/', getAllEstates);
+router.get('/getAll', getAllEstates); // legacy alias
+router.get('/search', searchEstates);
+router.get('/searchAll', searchAllEstates); // deprecated alias
+
+// ============================================================
+// SUBSCRIPTION (place BEFORE /estate/:id so "subscriptions"
+// isn't swallowed by the :id matcher)
+// ============================================================
+router.post('/subscription', subscription);
+router.get('/subscriptions/due', checkDueSubscriptions);
+router.get('/subscriptions/:estate_id/check', checkEstateDue);
+router.get('/subscriptions/:estate_id/billing-message', getBillingMessage);
+router.get(
+  '/subscriptions/:estate_id/disable-if-due',
+  checkAndDisableEstateSubscription
+);
+
+// ============================================================
+// READ
+// ============================================================
+router.get('/estate/:id', getEstateById);
+router.get('/name/:id', getEstateByName);
+router.get('/subscription/:id', getEstateSubById);
+
+// ============================================================
+// WRITE
+// ============================================================
+router.post('/create', createEstate);
+router.post('/createConfig', createEstateConfig); // deprecated, use /create
+router.patch('/update_estate/:id', updateEstate);
+router.delete('/delete/:id', deleteEstate);
 
 module.exports = router;

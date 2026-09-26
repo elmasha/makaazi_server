@@ -1,25 +1,44 @@
 const express = require('express');
 const router = express.Router();
-const { getAddressConfig, createEstateAddress,getEstateAddressConfig,saveEstateAddressConfig,addSection,addCourt,addStreet,getAddressDropdowns } = require('../controllers/estateConfigController');
 
-router.post('/create', createEstateAddress);    // Create a new estate
-router.get('/get_estates/:id', getAddressConfig);// get estate
-// ======================
+const {
+  // READ
+  getEstateAddressConfig,
+  getAddressConfig, // deprecated alias
+
+  // WRITE
+  saveEstateAddressConfig,
+  createEstateAddress, // deprecated alias
+
+  // DROPDOWNS
+  getAddressDropdowns,
+
+  // ADD COMPONENTS
+  addSection,
+  addCourt,
+  addStreet,
+} = require('../controllers/addressConfigController');
+
+// ============================================================
 // CONFIG
-// ======================
-router.get("/config/:estate_id", getEstateAddressConfig);
-router.post("/config", saveEstateAddressConfig);
+// ============================================================
+router.get('/estate/:estate_id', getEstateAddressConfig);
+router.post('/save', saveEstateAddressConfig);
 
-// ======================
-// ADMIN – DROPDOWN SETUP
-// ======================
-router.post("/add-section", addSection);
-router.post("/add-court", addCourt);
-router.post("/add-street", addStreet);
+// Legacy aliases (map to the same handlers)
+router.get('/config/:estate_id', getAddressConfig);
+router.post('/create', createEstateAddress);
 
-// ======================
-// REGISTRATION
-// ======================
-router.get("/dropdowns/:estate_id", getAddressDropdowns);
+// ============================================================
+// DROPDOWNS
+// ============================================================
+router.get('/dropdowns/:estate_id', getAddressDropdowns);
+
+// ============================================================
+// ADD ADDRESS COMPONENTS
+// ============================================================
+router.post('/section/add', addSection);
+router.post('/court/add', addCourt);
+router.post('/street/add', addStreet);
 
 module.exports = router;
