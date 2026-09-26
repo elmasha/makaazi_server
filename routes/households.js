@@ -15,7 +15,6 @@ const {
   getHouseholdByPhone,
   getHouseholdByUid,
   getHouseholdById,
-  // ⚡ NEW
   getAddressDropdowns,
   getEstateAddressConfig,
   createHousehold,
@@ -32,6 +31,13 @@ const {
   rejectHousehold,
 } = require('../controllers/householdApprovalController');
 
+// ⚡ ADD THIS
+const {
+  getHouseholdDashboard,
+  getHouseholdDashboardById,
+  getPaymentSummary,
+} = require('../controllers/householdDashboardController');
+
 // ============================================================
 // ORDER MATTERS — static/scoped first, /:id last
 // ============================================================
@@ -45,6 +51,11 @@ router.get('/estate/:estateId/pending',             getPendingHouseholds);
 router.post('/:householdId/approve',                approveHousehold);
 router.post('/:householdId/reject',                 rejectHousehold);
 
+// ⚡ ---- Household dashboard (resident) ----
+router.get('/dashboard/:uid',                       getHouseholdDashboard);
+router.get('/dashboard/pk/:householdId',            getHouseholdDashboardById);
+router.get('/payment-summary/:uid',                 getPaymentSummary);
+
 // ---- Static reads ----
 router.get('/getAll',                               getAllHouseholds);
 router.get('/by-address',                           getHouseholdsByAddress);
@@ -52,7 +63,7 @@ router.get('/search',                               searchHouseholds);
 router.get('/searchExisting/:phone',                existingHousehold);
 router.get('/getOfficials/:is_official',            getOfficials);
 
-// ---- Address dropdowns (⚡ NEW — must be before /:id routes) ----
+// ---- Address dropdowns ----
 router.get('/address-dropdowns/:estate_id',         getAddressDropdowns);
 router.get('/address-config/:estate_id',            getEstateAddressConfig);
 
@@ -67,7 +78,7 @@ router.get('/getHouseHoldId/:uid',                  getHouseholdByUid);
 router.get('/getHouseHoldByPhone/:estateId/:phone', getHouseholdByPhone);
 router.get('/getHousehold/:id',                     getHouseholdById);
 
-// ---- Writes (official-side create / edit) ----
+// ---- Writes ----
 router.post('/addHousehold',                        createHousehold);
 router.patch('/update_household/:id',               updateHousehold);
 router.post('/updateRoles/:id',                     updateHouseholdRoles);
