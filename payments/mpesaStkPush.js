@@ -1,7 +1,7 @@
 // payments/mpesaStkPush.js
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
+const request = require('request');
 const db = require('../config/db');
 const { sendNotification } = require('../utils/notify');
 
@@ -34,8 +34,29 @@ function normalizePhone(raw) {
   return phone;
 }
 
-function stkPassword() {
-  return Buffer.from(`${SHORT_CODE}${PASS_KEY}${timestamp()}`).toString('base64');
+/**
+ * Promisified request — keeps the "request" package but gives us async/await.
+ * Returns: { statusCode, body } where body is parsed if JSON.
+ */
+function httpRequest(options) {
+  return new Promise((resolve, reject) => {
+    request(options, (error, response, body) => {
+      if (error) return reject(error);
+      resolve({
+        statusCode: response?.statusCode,
+        body,
+        headers: response?.headers,
+      });
+    });
+  });
+}
+
+// Convenience wrappers
+function httpGet(url, headers = {}) {
+  return httpRequest({ url, method: 'GET', headers, json: true });
+}
+function httpPost(url, body, headers = {}) {
+  return httpRequest({ url, method: 'POST', headers, json: body });
 }
 
 // ============================================================
@@ -44,17 +65,17 @@ function stkPassword() {
 async function access(req, res, next) {
   try {
     const auth = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
-    const { data } = await axios.get(
+    const { body } = await httpGet(
       `${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`,
-      {
-        headers: { Authorization: `Basic ${auth}` },
-        timeout: 30000,
-      }
+      { Authorization: `Basic ${auth}` }
     );
-    req.access_token = data.access_token;
+    if (!body || !body.access_token) {
+      throw new Error('No access_token in Daraja response');
+    }
+    req.access_token = body.access_token;
     next();
   } catch (err) {
-    console.error('❌ Daraja access_token error:', err.response?.data || err.message);
+    console.error('❌ Daraja access_token error:', err.message || err);
     res.status(500).json({ error: 'Failed to get M-Pesa access token' });
   }
 }
@@ -102,9 +123,7 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
 
   const phoneNormalized = normalizePhone(phone);
   if (phoneNormalized.length !== 12) {
-    return res
-      .status(400)
-      .json({ error: 'Invalid phone number — use 2547XXXXXXXX' });
+    return res.status(400).json({ error: 'Invalid phone number — use 2547XXXXXXXX' });
   }
 
   const amountNum = Number(amount);
@@ -116,7 +135,7 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
   const password = Buffer.from(`${SHORT_CODE}${PASS_KEY}${ts}`).toString('base64');
 
   try {
-    const { data: darajaResp } = await axios.post(
+    const { body: darajaResp } = await httpPost(
       `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
       {
         BusinessShortCode: SHORT_CODE,
@@ -131,16 +150,12 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
         AccountReference: 'Makaazi Payment',
         TransactionDesc: 'Estate service payment',
       },
-      {
-        headers: { Authorization: `Bearer ${req.access_token}` },
-        timeout: 30000,
-      }
+      { Authorization: `Bearer ${req.access_token}` }
     );
 
     console.log('🔵 Daraja STK response:', darajaResp);
 
-    // Persist pending row — callback looks up by CheckoutRequestID
-    if (darajaResp.CheckoutRequestID) {
+    if (darajaResp?.CheckoutRequestID) {
       await db.promise().query(
         `INSERT INTO pending_stk_pushes
            (checkout_request_id, merchant_request_id, household_id, estate_id,
@@ -167,10 +182,10 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
 
     return res.status(200).json(darajaResp);
   } catch (err) {
-    console.error('❌ STK push error:', err.response?.data || err.message);
+    console.error('❌ STK push error:', err.message || err);
     return res.status(500).json({
       error: 'Failed to initiate STK push',
-      detail: err.response?.data?.errorMessage || err.message,
+      detail: err.message || 'Unknown error',
     });
   }
 });
@@ -192,7 +207,6 @@ router.post('/stk_callback', async (req, res) => {
   const checkoutRequestId = callback.CheckoutRequestID;
   const resultCode = callback.ResultCode;
 
-  // User cancelled or push failed
   if (resultCode !== 0 || !metadata) {
     console.log(`⚠️ STK failed/cancelled: ${resultCode} — ${callback.ResultDesc}`);
     if (checkoutRequestId) {
@@ -204,7 +218,6 @@ router.post('/stk_callback', async (req, res) => {
     return res.status(200).json({ message: 'Acknowledged' });
   }
 
-  // Extract metadata
   const find = (name) => metadata.Item.find((i) => i.Name === name)?.Value;
   const amount = find('Amount');
   const transID = find('MpesaReceiptNumber');
@@ -216,7 +229,6 @@ router.post('/stk_callback', async (req, res) => {
     return res.status(200).json({ message: 'Acknowledged' });
   }
 
-  // Look up the pending push — per-request state, no module variables
   const [pendingRows] = await db.promise().query(
     `SELECT * FROM pending_stk_pushes WHERE checkout_request_id = ? LIMIT 1`,
     [checkoutRequestId]
@@ -229,7 +241,6 @@ router.post('/stk_callback', async (req, res) => {
 
   const pending = pendingRows[0];
 
-  // Idempotency — Daraja retries on non-200, so guard against duplicates
   const [dupe] = await db.promise().query(
     `SELECT payment_id FROM payments WHERE transaction_id = ? LIMIT 1`,
     [transID]
@@ -243,7 +254,6 @@ router.post('/stk_callback', async (req, res) => {
     return res.status(200).json({ message: 'Already recorded' });
   }
 
-  // Insert into payments
   try {
     await db.promise().query(
       `INSERT INTO payments
@@ -297,9 +307,7 @@ router.post('/stk_callback', async (req, res) => {
           pending.household_id,
           pending.estate_id,
           pending.user_name || '',
-          '',
-          '',
-          '',
+          '', '', '',
           yearVal,
           pending.uid || null,
         ]
@@ -315,12 +323,10 @@ router.post('/stk_callback', async (req, res) => {
       const row = hpRows[0];
       const currentMonth = Number(row[monthKey] || 0);
       const newMonthVal = currentMonth + Number(amount || pending.amount);
-      const newTotal =
-        Number(row.total_paid || 0) + Number(amount || pending.amount);
-      const monthsEq =
-        pending.amount > 0
-          ? Number((newTotal / Number(pending.amount || 1)).toFixed(2))
-          : 0;
+      const newTotal = Number(row.total_paid || 0) + Number(amount || pending.amount);
+      const monthsEq = pending.amount > 0
+        ? Number((newTotal / Number(pending.amount || 1)).toFixed(2))
+        : 0;
 
       await db.promise().query(
         `UPDATE household_payments
@@ -334,7 +340,6 @@ router.post('/stk_callback', async (req, res) => {
     console.error('⚠️ household_payments update failed:', err.message);
   }
 
-  // Notify the resident
   try {
     await sendNotification({
       user_uid: pending.uid || String(pending.household_id),
@@ -361,7 +366,6 @@ router.post('/stk_query', access, async (req, res) => {
   }
 
   try {
-    // First check our DB — if it's already marked Completed, no need to ask Daraja
     const [pendingRows] = await db.promise().query(
       `SELECT * FROM pending_stk_pushes WHERE checkout_request_id = ? LIMIT 1`,
       [checkout_request_id]
@@ -385,11 +389,10 @@ router.post('/stk_query', access, async (req, res) => {
       }
     }
 
-    // Otherwise query Daraja directly
     const ts = timestamp();
     const password = Buffer.from(`${SHORT_CODE}${PASS_KEY}${ts}`).toString('base64');
 
-    const { data: darajaResp } = await axios.post(
+    const { body: darajaResp } = await httpPost(
       `${DARAJA_BASE}/mpesa/stkpushquery/v1/query`,
       {
         BusinessShortCode: SHORT_CODE,
@@ -397,16 +400,13 @@ router.post('/stk_query', access, async (req, res) => {
         Timestamp: ts,
         CheckoutRequestID: checkout_request_id,
       },
-      {
-        headers: { Authorization: `Bearer ${req.access_token}` },
-        timeout: 30000,
-      }
+      { Authorization: `Bearer ${req.access_token}` }
     );
 
     console.log('🔵 STK query Daraja resp:', darajaResp);
 
-    const resultCode = String(darajaResp.ResultCode ?? darajaResp.errorCode ?? '');
-    const resultDesc = darajaResp.ResultDesc || darajaResp.errorMessage || '';
+    const resultCode = String(darajaResp?.ResultCode ?? darajaResp?.errorCode ?? '');
+    const resultDesc = darajaResp?.ResultDesc || darajaResp?.errorMessage || '';
     let mpesaStatus = 'pending';
 
     if (resultCode === '0') mpesaStatus = 'success';
@@ -421,7 +421,7 @@ router.post('/stk_query', access, async (req, res) => {
       mpesa_status: mpesaStatus,
     });
   } catch (err) {
-    console.error('❌ STK query error:', err.response?.data || err.message);
+    console.error('❌ STK query error:', err.message || err);
     return res.status(500).json({ error: 'Query failed' });
   }
 });
@@ -438,13 +438,11 @@ router.post('/trans_status', access, async (req, res) => {
 
   const securityCredential = process.env.MPESA_SECURITY_CREDENTIAL;
   if (!securityCredential) {
-    return res
-      .status(500)
-      .json({ error: 'MPESA_SECURITY_CREDENTIAL not configured' });
+    return res.status(500).json({ error: 'MPESA_SECURITY_CREDENTIAL not configured' });
   }
 
   try {
-    const { data } = await axios.post(
+    const { body } = await httpPost(
       `${DARAJA_BASE}/mpesa/transactionstatus/v1/query`,
       {
         Initiator: process.env.MPESA_INITIATOR || 'testapi',
@@ -458,20 +456,17 @@ router.post('/trans_status', access, async (req, res) => {
         Remarks: 'OK',
         Occasion: 'OK',
       },
-      {
-        headers: { Authorization: `Bearer ${req.access_token}` },
-        timeout: 30000,
-      }
+      { Authorization: `Bearer ${req.access_token}` }
     );
-    return res.status(200).json(data);
+    return res.status(200).json(body);
   } catch (err) {
-    console.error('❌ trans_status error:', err.response?.data || err.message);
+    console.error('❌ trans_status error:', err.message || err);
     return res.status(500).json({ error: 'Transaction status query failed' });
   }
 });
 
 // ============================================================
-// POST /payment/timeout_status, /result_status — Daraja status callbacks
+// POST /payment/timeout_status, /result_status
 // ============================================================
 router.post('/timeout_status', (req, res) => {
   console.log('.......... Timeout status ..................');
@@ -492,9 +487,7 @@ router.post('/stk_push_subscription', access, async (req, res) => {
   const { estate_id, phone_number } = req.body;
 
   if (!estate_id || !phone_number) {
-    return res
-      .status(400)
-      .json({ error: 'estate_id and phone_number are required' });
+    return res.status(400).json({ error: 'estate_id and phone_number are required' });
   }
 
   const phoneNormalized = normalizePhone(phone_number);
@@ -525,7 +518,7 @@ router.post('/stk_push_subscription', access, async (req, res) => {
     const ts = timestamp();
     const password = Buffer.from(`${SHORT_CODE}${PASS_KEY}${ts}`).toString('base64');
 
-    const { data: darajaResp } = await axios.post(
+    const { body: darajaResp } = await httpPost(
       `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
       {
         BusinessShortCode: SHORT_CODE,
@@ -540,15 +533,12 @@ router.post('/stk_push_subscription', access, async (req, res) => {
         AccountReference: 'Makaazi Subscription',
         TransactionDesc: 'Estate subscription payment',
       },
-      {
-        headers: { Authorization: `Bearer ${req.access_token}` },
-        timeout: 30000,
-      }
+      { Authorization: `Bearer ${req.access_token}` }
     );
 
     console.log('🔵 Subscription STK:', darajaResp);
 
-    if (darajaResp.CheckoutRequestID) {
+    if (darajaResp?.CheckoutRequestID) {
       await db.promise().query(
         `INSERT INTO pending_stk_pushes
            (checkout_request_id, merchant_request_id, household_id, estate_id,
@@ -567,7 +557,7 @@ router.post('/stk_push_subscription', access, async (req, res) => {
 
     return res.status(200).json(darajaResp);
   } catch (err) {
-    console.error('❌ Subscription STK error:', err.response?.data || err.message);
+    console.error('❌ Subscription STK error:', err.message || err);
     return res.status(500).json({ error: 'Subscription STK push failed' });
   }
 });
@@ -687,7 +677,7 @@ router.post('/stk_push_subscription/query', access, async (req, res) => {
     const ts = timestamp();
     const password = Buffer.from(`${SHORT_CODE}${PASS_KEY}${ts}`).toString('base64');
 
-    const { data } = await axios.post(
+    const { body } = await httpPost(
       `${DARAJA_BASE}/mpesa/stkpushquery/v1/query`,
       {
         BusinessShortCode: SHORT_CODE,
@@ -695,21 +685,18 @@ router.post('/stk_push_subscription/query', access, async (req, res) => {
         Timestamp: ts,
         CheckoutRequestID: checkoutRequestId,
       },
-      {
-        headers: { Authorization: `Bearer ${req.access_token}` },
-        timeout: 30000,
-      }
+      { Authorization: `Bearer ${req.access_token}` }
     );
 
-    return res.status(200).json(data);
+    return res.status(200).json(body);
   } catch (err) {
-    console.error('❌ Subscription query error:', err.response?.data || err.message);
+    console.error('❌ Subscription query error:', err.message || err);
     return res.status(500).json({ error: 'Query failed' });
   }
 });
 
 // ============================================================
-// POST /payment/subscription/initiate — compute billing info
+// POST /payment/subscription/initiate
 // ============================================================
 router.post('/subscription/initiate', async (req, res) => {
   const { estate_id } = req.body;
