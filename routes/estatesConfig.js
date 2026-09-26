@@ -17,7 +17,7 @@ const {
   addSection,
   addCourt,
   addStreet,
-} = require('../controllers/estatesConfigController');
+} = require('../controllers/estateConfigController');
 
 // ============================================================
 // CONFIG
