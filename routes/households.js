@@ -19,6 +19,7 @@ const {
   getEstateAddressConfig,
   getHouseholdPayments,          // ⚡ NEW
   createHousehold,
+  getEstateHouseholdList,
   updateHouseholdRoles,
   updateHousehold,
   deleteHousehold,
@@ -86,5 +87,10 @@ router.post('/addHousehold',                        createHousehold);
 router.patch('/update_household/:id',               updateHousehold);
 router.post('/updateRoles/:id',                     updateHouseholdRoles);
 router.delete('/deleteHousehold/:id',               deleteHousehold);
+
+
+// Place BEFORE any /:id catch-all
+router.get('/estate/:estateId/households/list', getEstateHouseholdList);
+
 
 module.exports = router;
