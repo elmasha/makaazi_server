@@ -17,6 +17,7 @@ const {
   getHouseholdById,
   getAddressDropdowns,
   getEstateAddressConfig,
+  getHouseholdPayments,          // ⚡ NEW
   createHousehold,
   updateHouseholdRoles,
   updateHousehold,
@@ -31,7 +32,6 @@ const {
   rejectHousehold,
 } = require('../controllers/householdApprovalController');
 
-// ⚡ ADD THIS
 const {
   getHouseholdDashboard,
   getHouseholdDashboardById,
@@ -51,10 +51,13 @@ router.get('/estate/:estateId/pending',             getPendingHouseholds);
 router.post('/:householdId/approve',                approveHousehold);
 router.post('/:householdId/reject',                 rejectHousehold);
 
-// ⚡ ---- Household dashboard (resident) ----
+// ---- Household dashboard (resident) ----
 router.get('/dashboard/:uid',                       getHouseholdDashboard);
 router.get('/dashboard/pk/:householdId',            getHouseholdDashboardById);
 router.get('/payment-summary/:uid',                 getPaymentSummary);
+
+// ⚡ ---- Household payments (resident) ----
+router.get('/:householdId/payments',                getHouseholdPayments);
 
 // ---- Static reads ----
 router.get('/getAll',                               getAllHouseholds);

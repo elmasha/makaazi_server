@@ -41,6 +41,41 @@ async function invalidateHouseholdCaches(estateId, pk, uid) {
 // READS
 // ==================================================================
 
+
+// ==================================================================
+// HOUSEHOLD PAYMENTS (per-household transaction log)
+// ==================================================================
+
+/**
+ * GET /households/:householdId/payments
+ * Returns all payments for a household, newest first.
+ */
+exports.getHouseholdPayments = async (req, res) => {
+  const { householdId } = req.params;
+
+  if (!householdId) {
+    return res.status(400).json({ error: 'householdId is required' });
+  }
+
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT payment_id, household_id, estate_id, charge_id,
+              amount_paid, payment_method, transaction_id,
+              payment_status, payment_date, receipt_url, created_at
+       FROM payments
+       WHERE household_id = ?
+       ORDER BY payment_date DESC, payment_id DESC`,
+      [householdId]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('getHouseholdPayments error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+};
+
+
 // GET /households/by-address?estate_id=&section=&street=&court=
 exports.getHouseholdsByAddress = async (req, res) => {
   const { estate_id, section, street, court } = req.query;
