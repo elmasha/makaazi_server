@@ -23,9 +23,14 @@ const MONTHS_SHORT = [
 /**
  * Sum of all Monthly-frequency service charges for an estate.
  * Returns 0 if none configured (avoids divide-by-zero upstream).
+ *
+ * @param {number} estateId
+ * @param {object} [connection]  Optional connection for transactions
+ * @returns {Promise<number>}
  */
-async function getEstateMonthlyRate(estateId) {
-  const [rows] = await db.promise().query(
+async function getEstateMonthlyRate(estateId, connection = null) {
+  const runner = connection || db.promise();
+  const [rows] = await runner.query(
     `SELECT COALESCE(SUM(amount), 0) AS rate
      FROM service_charges
      WHERE estate_id = ?
@@ -37,10 +42,56 @@ async function getEstateMonthlyRate(estateId) {
 
 /**
  * Annual due = monthly rate × 12.
+ *
+ * @param {number} estateId
+ * @returns {Promise<number>}
  */
 async function getEstateAnnualDue(estateId) {
   const monthly = await getEstateMonthlyRate(estateId);
   return monthly * 12;
+}
+
+/**
+ * Breakdown of all charges for an estate grouped by frequency.
+ * Useful for showing residents what they're being charged for.
+ *
+ * @param {number} estateId
+ * @returns {Promise<{
+ *   monthly: number,
+ *   quarterly: number,
+ *   half_yearly: number,
+ *   annual: number,
+ *   adhoc: number,
+ *   items: Array<{charges_id:number, charge_type:string, frequency:string, amount:number}>
+ * }>}
+ */
+async function getEstateChargesBreakdown(estateId) {
+  const [rows] = await db.promise().query(
+    `SELECT charges_id, charge_type, frequency, amount
+     FROM service_charges
+     WHERE estate_id = ?
+     ORDER BY frequency, charge_type`,
+    [estateId]
+  );
+
+  const buckets = {
+    monthly: 0,
+    quarterly: 0,
+    half_yearly: 0,
+    annual: 0,
+    adhoc: 0,
+  };
+
+  for (const r of rows) {
+    const key = String(r.frequency || '').toLowerCase().replace(/[^a-z]/g, '_');
+    if (key === 'monthly')          buckets.monthly     += Number(r.amount || 0);
+    else if (key === 'quarterly')   buckets.quarterly   += Number(r.amount || 0);
+    else if (key === 'half_yearly') buckets.half_yearly += Number(r.amount || 0);
+    else if (key === 'annual')      buckets.annual      += Number(r.amount || 0);
+    else                            buckets.adhoc       += Number(r.amount || 0);
+  }
+
+  return { ...buckets, items: rows };
 }
 
 /**
@@ -67,6 +118,14 @@ function formatMoney(n) {
   });
 }
 
+/**
+ * Safe number coercion — returns fallback for null/undefined/NaN.
+ */
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return isNaN(n) || !isFinite(n) ? fallback : n;
+}
+
 // ==================================================================
 // DASHBOARD MATH (pure function — no DB calls)
 // ==================================================================
@@ -74,22 +133,28 @@ function formatMoney(n) {
 /**
  * Compute a household's dashboard numbers from an already-loaded row.
  *
+ * FORMULA:
+ *   due_to_date = balance_brought_forward + (monthly_rate × months_elapsed)
+ *   overdue     = max(0, due_to_date - total_paid)
+ *   prepaid     = max(0, total_paid - due_to_date)
+ *   months_eq   = total_paid / monthly_rate          (0 if rate is 0)
+ *
  * @param {Object} paymentRow  Row from household_payments
- *                             (must include balance_brought_forward, total_paid)
+ *                             (may include: balance_brought_forward, total_paid)
  * @param {Number} monthlyRate Estate monthly rate (pre-fetched by caller)
  * @param {Date}   today       For testability
  */
 function computeDashboard(paymentRow, monthlyRate, today = new Date()) {
-  const rate = Number(monthlyRate) || 0;
+  const rate = safeNum(monthlyRate, 0);
   const annualDue = rate * 12;
   const monthsElapsed = monthOfYear(today);
 
-  const bf = Number(paymentRow?.balance_brought_forward || 0);
-  const totalPaid = Number(paymentRow?.total_paid || 0);
+  const bf        = safeNum(paymentRow?.balance_brought_forward, 0);
+  const totalPaid = safeNum(paymentRow?.total_paid, 0);
 
   const dueToDate = bf + rate * monthsElapsed;
-  const overdue = Math.max(0, dueToDate - totalPaid);
-  const prepaid = Math.max(0, totalPaid - dueToDate);
+  const overdue   = Math.max(0, dueToDate - totalPaid);
+  const prepaid   = Math.max(0, totalPaid - dueToDate);
 
   const monthsEquivalent = rate > 0
     ? Number((totalPaid / rate).toFixed(2))
@@ -99,17 +164,39 @@ function computeDashboard(paymentRow, monthlyRate, today = new Date()) {
   if (overdue > 0) status = 'Overdue';
   else if (prepaid > 0) status = 'Prepaid';
 
-  return {
+  const result = {
+    // Preferred names
     balance_brought_forward: Number(bf.toFixed(2)),
-    due_to_date: Number(dueToDate.toFixed(2)),
-    total_paid: Number(totalPaid.toFixed(2)),
-    overdue: Number(overdue.toFixed(2)),
-    prepaid: Number(prepaid.toFixed(2)),
-    months_equivalent: monthsEquivalent,
+    due_to_date:             Number(dueToDate.toFixed(2)),
+    total_paid:              Number(totalPaid.toFixed(2)),
+    overdue:                 Number(overdue.toFixed(2)),
+    prepaid:                 Number(prepaid.toFixed(2)),
+    months_equivalent:       monthsEquivalent,
+    monthly_equivalent:      monthsEquivalent,   // alias used by some controllers
     status,
-    monthly_rate: rate,
-    annual_due: Number(annualDue.toFixed(2)),
-    months_elapsed: monthsElapsed,
+    monthly_rate:            rate,
+    annual_due:              Number(annualDue.toFixed(2)),
+    months_elapsed:          monthsElapsed,
+  };
+
+  // Backwards-compatible alias
+  result.due_year_to_date = result.due_to_date;
+
+  return result;
+}
+
+/**
+ * Just the overdue + prepaid numbers, for controllers that only need those.
+ * Returns { overdue, prepaid } as positive numbers.
+ */
+function computeOverdueAndPrepaid(totalPaid, dueYearToDate) {
+  const paid = safeNum(totalPaid, 0);
+  const due  = safeNum(dueYearToDate, 0);
+  const diff = due - paid;
+  return {
+    overdue:  diff > 0 ? Number(diff.toFixed(2)) : 0,
+    prepaid:  diff < 0 ? Number(Math.abs(diff).toFixed(2)) : 0,
+    on_track: diff === 0,
   };
 }
 
@@ -126,7 +213,7 @@ function computeDashboard(paymentRow, monthlyRate, today = new Date()) {
  *             amount_formatted, count, display }
  */
 async function buildMonthlyTable(householdId, year) {
-  // 1. Summary row (amounts)
+  // 1. Summary row (amounts) — tolerate missing row
   const [rows] = await db.promise().query(
     `SELECT * FROM household_payments
      WHERE household_id = ? AND year = ? LIMIT 1`,
@@ -148,7 +235,7 @@ async function buildMonthlyTable(householdId, year) {
   // 3. Assemble
   return MONTHS_FULL.map((name, idx) => {
     const key = name.toLowerCase();
-    const amount = Number(summary[key] || 0);
+    const amount = safeNum(summary[key], 0);
     const count = countMap[idx + 1] || 0;
 
     let display;
@@ -178,7 +265,7 @@ function buildMonthlyTableFromRow(summaryRow, countMap = {}) {
   const s = summaryRow || {};
   return MONTHS_FULL.map((name, idx) => {
     const key = name.toLowerCase();
-    const amount = Number(s[key] || 0);
+    const amount = safeNum(s[key], 0);
     const count = countMap[idx + 1] || 0;
 
     let display;
@@ -203,25 +290,34 @@ function buildMonthlyTableFromRow(summaryRow, countMap = {}) {
  * Returns: { [householdId]: { [monthNumber]: count } }
  *
  * Use alongside buildMonthlyTableFromRow() in estate list endpoints.
+ *
+ * Handles large arrays by chunking (MySQL IN() has a param limit).
  */
 async function getBulkMonthlyCounts(householdIds, year) {
   if (!householdIds || householdIds.length === 0) return {};
 
-  const placeholders = householdIds.map(() => '?').join(',');
-  const [rows] = await db.promise().query(
-    `SELECT household_id, MONTH(payment_date) AS m, COUNT(*) AS c
-     FROM payments
-     WHERE household_id IN (${placeholders})
-       AND YEAR(payment_date) = ?
-     GROUP BY household_id, MONTH(payment_date)`,
-    [...householdIds, year]
-  );
-
   const result = {};
-  for (const r of rows) {
-    if (!result[r.household_id]) result[r.household_id] = {};
-    result[r.household_id][r.m] = r.c;
+  const CHUNK = 500;
+
+  for (let i = 0; i < householdIds.length; i += CHUNK) {
+    const chunk = householdIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+
+    const [rows] = await db.promise().query(
+      `SELECT household_id, MONTH(payment_date) AS m, COUNT(*) AS c
+       FROM payments
+       WHERE household_id IN (${placeholders})
+         AND YEAR(payment_date) = ?
+       GROUP BY household_id, MONTH(payment_date)`,
+      [...chunk, year]
+    );
+
+    for (const r of rows) {
+      if (!result[r.household_id]) result[r.household_id] = {};
+      result[r.household_id][r.m] = r.c;
+    }
   }
+
   return result;
 }
 
@@ -235,7 +331,10 @@ async function getBulkMonthlyCounts(householdIds, year) {
  * Example: GALIL-H-1770569818607-4412
  */
 function generateHouseholdUrn(estateUrn) {
-  const prefix = String(estateUrn || 'EST').split('-')[0].slice(0, 5).toUpperCase();
+  const prefix = String(estateUrn || 'EST')
+    .split('-')[0]
+    .slice(0, 5)
+    .toUpperCase();
   const ts = Date.now();
   const rand = Math.floor(1000 + Math.random() * 9000);
   return `${prefix}-H-${ts}-${rand}`;
@@ -249,6 +348,7 @@ module.exports = {
   // Rates
   getEstateMonthlyRate,
   getEstateAnnualDue,
+  getEstateChargesBreakdown,
 
   // Time
   monthOfYear,
@@ -257,6 +357,8 @@ module.exports = {
 
   // Math
   computeDashboard,
+  computeOverdueAndPrepaid,
+  safeNum,
 
   // Monthly grids
   buildMonthlyTable,
