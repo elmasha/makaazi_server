@@ -1,415 +1,455 @@
+// controllers/officialsController.js
 const db = require('../config/db');
 const redisClient = require('../config/redis');
-const { sendNotification } = require("../utils/notify");
+const { sendNotification } = require('../utils/notify');
 
+// ============================================================
+// Cache keys
+// ============================================================
+const CACHE = {
+  all:            'officials:all',
+  byEstate:  (e) => `official:estate:${e}`,
+  byContact: (c) => `official:contact:${c}`,
+  byUid:    (u) => `getofficial/:${u}`,
+  exists:   (c) => `official:exists:${c}`,
+  search:   (q) => `search:officials:${q}`,
+  addressSummary: (e, y, t, m) => `summary:${e}:${y}:${t}:${m}`,
+};
 
-const DEFAULT_EXPIRATION = 60;
+async function invalidateOfficialCaches(estateId, uid, contact) {
+  const keys = [CACHE.all];
+  if (estateId) keys.push(CACHE.byEstate(estateId));
+  if (uid)      keys.push(CACHE.byUid(uid));
+  if (contact)  keys.push(CACHE.byContact(contact), CACHE.exists(contact));
+  await Promise.all(keys.map((k) => redisClient.del(k)));
+}
 
-
-/**
- * type = "section" | "street" | "court"
- */
+// ============================================================
+// ADDRESS SUMMARY — section / court / street rollups
+// GET /officials/address-summary?estate_id=&type=&year=
+// ============================================================
 exports.getAddressSummary = async (req, res) => {
-    const { estate_id, type, year } = req.query;
-
-    if (!estate_id)
-        return res.status(400).json({ error: "estate_id is required" });
-
-    if (!type || !["section", "street", "court"].includes(type))
-        return res.status(400).json({ error: "type must be section, street, or court" });
-
-    const selectedYear = year || new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
-
-    const cacheKey = `summary:${estate_id}:${selectedYear}:${type}:${currentMonth}`;
-
-    try {
-        // 1️⃣ Redis cache
-        const cached = await redisClient.get(cacheKey);
-        if (cached) return res.json(JSON.parse(cached));
-
-        // 🔥 HARDCODED MONTHLY RATE
-        const monthlyRate = 2000;
-
-        // 2️⃣ Build dynamic month sum
-        const monthColumns = [
-            "january", "february", "march", "april", "may", "june",
-            "july", "august", "september", "october", "november", "december"
-        ].slice(0, currentMonth);
-
-        const monthSum = monthColumns
-            .map(c => `COALESCE(hp.${c},0)`)
-            .join(" + ");
-
-        const sql = `
-            SELECT
-                h.${type} AS name,
-                COUNT(DISTINCT h.household_id) AS households,
-                COALESCE(SUM(${monthSum}), 0) AS total_paid
-            FROM households h
-            LEFT JOIN household_payments hp
-                ON h.household_id = hp.household_id
-                AND hp.year = ?
-            WHERE h.estate_id = ?
-            GROUP BY h.${type}
-            ORDER BY h.${type}
-        `;
-
-        const [rows] = await db.promise().query(sql, [selectedYear, estate_id]);
-
-        const result = rows.map(r => {
-
-            const households = parseInt(r.households);
-            const totalPaid = parseFloat(r.total_paid || 0);
-
-            // Expected per household up to this month
-            const expectedPerHousehold = monthlyRate * currentMonth;
-
-            // Expected for ALL households
-            const totalExpected = expectedPerHousehold * households;
-
-            const arrears = totalExpected - totalPaid;
-
-            return {
-                name: r.name,
-                households,
-                total_paid: totalPaid.toFixed(2),
-                arrears: arrears.toFixed(2)
-            };
-        });
-
-        // 3️⃣ Cache for 10 minutes
-        await redisClient.setEx(cacheKey, 200, JSON.stringify(result));
-
-        return res.json(result);
-
-    } catch (err) {
-        console.error("Address summary error:", err.message);
-        return res.status(500).json({ error: "Failed to fetch address summary" });
-    }
-};
-
-
-
-// Get all officials with Redis caching
-exports.getAllOfficials = async (req, res) => {
-    // Construct a unique cache key for all officials
-    const cacheKey = `officials:all`;
-
-    try {
-        // Step 1: Check if the data is cached
-        const cachedResults = await redisClient.get(cacheKey);
-        if (cachedResults) {
-            console.log('🔁 Serving all officials from Redis cache');
-            return res.status(200).json(JSON.parse(cachedResults));
-        }
-
-        // Step 2: If not cached, query the database
-        const sql = 'SELECT * FROM officials';
-        db.query(sql, async (err, results) => {
-            if (err) {
-                console.error("❌ Database error:", err.message);
-                return res.status(500).json({ error: err.message });
-            }
-
-            // Step 3: Cache the results with a 5-minute expiration
-            await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
-            console.log('💾 Cached all officials data');
-
-            res.json(results);
-        });
-    } catch (error) {
-        console.error('❌ Redis error:', error.message);
-        res.status(500).json({ error: 'Server error' });
-    }
-};
-
-// Create Official
-exports.addOfficial = (req, res) => {
-    const { estate_id,full_name,official_id, role, contact_number, estate_urn,uid } = req.body;
-
-    const sql = `
-        INSERT INTO officials ( estate_id,full_name,official_id, role, contact_number, estate_urn,uid)
-        VALUES (?,?,?,?,?,?,?);
-    `;
-    const data = [ estate_id,full_name,official_id, role, contact_number, estate_urn, uid];
-
-    db.query(sql, data, async (err, result) => {
-        if (err) {
-            console.error("❌ Error adding official:", err.message);
-            return res.status(500).json({ error: err.message });
-        }
-        await sendNotification({
-                user_uid: official_id,
-                user_type: "USER",
-                title: "Official Added",
-                message: "You have been added as an official.",
-                type: "SYSTEM",
-                });
-        res.json({ message: 'Official added successfully', officialId: result.insertId });
-    });
-};
-
-// Get official by estateId with Redis caching
-exports.getOfficialByEstateId = async (req, res) => {
-    const estate_id = req.params.estate_id;
-    const cacheKey = `official:estate:${estate_id}`;
-
-    try {
-        // Step 1: Check if data is in Redis
-        const cachedData = await redisClient.get(cacheKey);
-        if (cachedData) {
-            console.log('🔁 Serving official from Redis cache');
-            return res.status(200).json(JSON.parse(cachedData));
-        }
-
-        // Step 2: Query MySQL if not cached
-        const sql = `SELECT * FROM officials WHERE estate_id = ?`;
-        db.query(sql, [estate_id], async (err, results) => {
-            if (err) {
-                console.error("❌ MySQL error:", err.message);
-                return res.status(500).json({ error: 'Database error' });
-            }
-
-            if (results.length === 0) {
-                return res.status(404).json({ message: 'Official not found' });
-            }
-
-            // Step 3: Cache the result
-            await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
-            console.log('💾 Official cached in Redis');
-
-            res.status(200).json(results);
-        });
-    } catch (error) {
-        console.error('❌ Redis error:', error.message);
-        res.status(500).json({ error: 'Server error' });
-    }
-};
-
-// Get official by contact_number with Redis caching
-exports.getOfficialByContact = async (req, res) => {
-    const contact_number = req.params.phone;
-    const cacheKey = `official:contact:${contact_number}`;
-
-    try {
-        // Step 1: Check if data is in Redis
-        const cachedData = await redisClient.get(cacheKey);
-        if (cachedData) {
-            console.log('🔁 Serving official from Redis cache');
-            return res.status(200).json(JSON.parse(cachedData));
-        }
-
-        // Step 2: Query MySQL if not cached
-        const sql = `SELECT * FROM officials WHERE contact_number = ?`;
-        db.query(sql, [contact_number], async (err, results) => {
-            if (err) {
-                console.error("❌ MySQL error:", err.message);
-                return res.status(500).json({ error: 'Database error' });
-            }
-
-            if (results.length === 0) {
-                return res.status(404).json({ message: 'Official not found' });
-            }
-
-            // Step 3: Cache the result
-            await redisClient.setEx(cacheKey, 300, JSON.stringify(results[0]));
-            console.log('💾 Official cached in Redis');
-
-            res.status(200).json(results[0]);
-        });
-    } catch (error) {
-        console.error('❌ Redis error:', error.message);
-        res.status(500).json({ error: 'Server error' });
-    }
-};
-
-
-
-
-// Get official by contact number with Redis caching
-exports.getOfficialById = async (req, res) => {
-    const uid = req.params.uid;
-
-    // Construct a unique cache key using the official's contact number
-    const cacheKey = `getofficial/:${uid}`;
-
-    try {
-        // Step 1: Check if the data is cached
-        const cachedResult = await redisClient.get(cacheKey);
-        if (cachedResult) {
-            console.log('🔁 Serving from Redis cache');
-            return res.status(200).json(JSON.parse(cachedResult));
-        }
-
-        // Step 2: If not cached, query the database
-        const sql = `SELECT * FROM officials WHERE uid = ?`;
-        db.query(sql, [uid], async (err, results) => {
-            if (err) {
-                console.error("❌ Database Error:", err.message);
-                return res.status(500).send("Error retrieving official");
-            }
-
-            if (results.length === 0) {
-                return res.status(404).send("Official not found");
-            }
-
-            // Step 3: Cache the result with a 5-minute expiration
-            await redisClient.setEx(cacheKey, 300, JSON.stringify(results[0]));
-            console.log('💾 Cached official data by ID');
-
-           return res.status(200).json(results[0]);
-        });
-    } catch (error) {
-        console.error('❌ Redis error:', error.message);
-        return  res.status(500).json({ error: 'Server error' });
-    }
-};
-
-// Search officials with Redis caching
-exports.searchOfficials = async (req, res) => {
-    const { query } = req.query; // Retrieve the search query from the client
-
-    if (!query) {
-        return res.status(400).send("Search query is required");
-    }
-
-    // Construct a unique cache key using the search query
-    const cacheKey = `search:officials:${query}`;
-
-    try {
-        // Step 1: Check if the search results are cached
-        const cachedResults = await redisClient.get(cacheKey);
-        if (cachedResults) {
-            console.log('🔁 Serving search results from Redis cache');
-            return res.status(200).json(JSON.parse(cachedResults));
-        }
-
-        // Step 2: If not cached, perform a full-text search in the database
-        let sql = `
-            SELECT full_name, role, contact_number
-            FROM officials
-            WHERE MATCH(full_name, role, contact_number) AGAINST(? IN NATURAL LANGUAGE MODE)
-        `;
-        db.query(sql, query, async (err, results) => {
-            if (err) {
-                console.error('❌ Error searching officials:', err);
-                return res.status(500).send("Error searching officials");
-            }
-
-            // Step 3: Cache the results in Redis with a 5-minute expiration
-            await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
-            console.log('💾 Search results cached');
-
-            res.status(200).json(results);
-        });
-    } catch (error) {
-        console.error('❌ Redis error:', error.message);
-        res.status(500).json({ error: 'Server error' });
-    }
-};
-
-
-
-///.......Update official......////
-exports.updateOfficial = (req, res) => {
-    const officialId = req.params.id;
-    const fields = req.body;
-
-    // Check if the ID is provided
-    if (!officialId) {
-        return res.status(400).json({ error: "official ID is required" });
-    }
-    // Check if there are fields to update
-    if (Object.keys(fields).length === 0) {
-        return res.status(400).json({ error: "No fields to update" });
-    }
-    // Build dynamic SQL query and values array
-    let sql = "UPDATE officials SET ";
-    const values = [];
-
-    for (const [key, value] of Object.entries(fields)) {
-        sql += `${key} = ?, `;
-        values.push(value);
-    }
-    // Remove the last comma and space
-    sql = sql.slice(0, -2);
-
-    // Add the WHERE clause
-    sql += " WHERE official_id = ?";
-    values.push(officialId);
-
-    // Execute the query
-    db.query(sql, values, (err, result) => {
-        if (err) {
-            console.error("Database Error:", err.message);
-            return res.status(500).json({ error: err.message });
-        }
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: "official not found" });
-        }
-
-        res.json({ message: "official updated successfully" });
-    });
-};
-
-
-
-////.......Delete official...../////
-exports.deleteOfficial = (req, res) => {
-    const contact_number = req.params.id;
-
-    const sql = `DELETE FROM officials WHERE contact_number = ?`;
-
-    db.query(sql, [contact_number], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'official not found' });
-        }
-
-        res.json({ message: 'official deleted successfully' });
-    });
-};
-
-////.......Official official...../////
-exports.existingOfficial = async (req, res) => {
-  const phone = req.params.phone;
-  const cacheKey = `official:exists:${phone}`;
+  const { estate_id, type, year } = req.query;
+
+  if (!estate_id) {
+    return res.status(400).json({ error: 'estate_id is required' });
+  }
+  if (!type || !['section', 'street', 'court'].includes(type)) {
+    return res.status(400).json({ error: 'type must be section, street, or court' });
+  }
+
+  const selectedYear = parseInt(year) || new Date().getFullYear();
+  const currentMonth = new Date().getMonth() + 1;
+
+  const cacheKey = CACHE.addressSummary(estate_id, selectedYear, type, currentMonth);
 
   try {
-    // Step 1: Check Redis cache
+    const cached = await redisClient.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+
+    // ✅ FIX: read monthly rate from service_charges instead of hardcoding
+    const [rates] = await db.promise().query(
+      `SELECT COALESCE(SUM(amount), 0) AS rate
+       FROM service_charges
+       WHERE estate_id = ? AND frequency = 'Monthly'`,
+      [estate_id]
+    );
+    const monthlyRate = Number(rates[0]?.rate || 0);
+
+    // Build dynamic sum of month columns up to current month
+    const monthColumns = [
+      'january', 'february', 'march', 'april', 'may', 'june',
+      'july', 'august', 'september', 'october', 'november', 'december',
+    ].slice(0, currentMonth);
+
+    const monthSum = monthColumns.map((c) => `COALESCE(hp.${c},0)`).join(' + ');
+
+    // Note: `type` is validated against a whitelist above, so
+    // interpolating it here is safe from SQL injection.
+    const sql = `
+      SELECT
+        h.${type} AS name,
+        COUNT(DISTINCT h.household_id) AS households,
+        COALESCE(SUM(${monthSum}), 0) AS total_paid
+      FROM households h
+      LEFT JOIN household_payments hp
+        ON h.household_id = hp.household_id
+        AND hp.year = ?
+      WHERE h.estate_id = ?
+        AND h.status = 'Approved'
+      GROUP BY h.${type}
+      ORDER BY h.${type}
+    `;
+
+    const [rows] = await db.promise().query(sql, [selectedYear, estate_id]);
+
+    const result = rows.map((r) => {
+      const households = parseInt(r.households, 10) || 0;
+      const totalPaid = parseFloat(r.total_paid || 0);
+      const expectedPerHousehold = monthlyRate * currentMonth;
+      const totalExpected = expectedPerHousehold * households;
+      const balance = totalPaid - totalExpected;
+
+      return {
+        name: r.name || 'Uncategorised',
+        households,
+        total_paid: Number(totalPaid.toFixed(2)),
+        arrears: Number(Math.max(0, -balance).toFixed(2)),      // negative → owed
+        prepayment: Number(Math.max(0, balance).toFixed(2)),    // positive → extra
+        monthly_rate: monthlyRate,
+      };
+    });
+
+    await redisClient.setEx(cacheKey, 200, JSON.stringify(result));
+    return res.json(result);
+  } catch (err) {
+    console.error('Address summary error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch address summary' });
+  }
+};
+
+// ============================================================
+// GET /officials/getAll
+// ============================================================
+exports.getAllOfficials = async (req, res) => {
+  try {
+    const cached = await redisClient.get(CACHE.all);
+    if (cached) {
+      console.log('🔁 Serving all officials from Redis cache');
+      return res.status(200).json(JSON.parse(cached));
+    }
+
+    const [results] = await db.promise().query('SELECT * FROM officials');
+    await redisClient.setEx(CACHE.all, 300, JSON.stringify(results));
+    console.log('💾 Cached all officials data');
+    return res.json(results);
+  } catch (error) {
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ============================================================
+// POST /officials/addOfficial
+// Body: { estate_id, full_name, role, contact_number, uid, estate_urn? }
+// ============================================================
+exports.addOfficial = async (req, res) => {
+  const { estate_id, full_name, role, contact_number, uid, estate_urn = null } = req.body;
+
+  const missing = [];
+  if (!estate_id)      missing.push('estate_id');
+  if (!full_name)      missing.push('full_name');
+  if (!role)           missing.push('role');
+  if (!contact_number) missing.push('contact_number');
+  if (!uid)            missing.push('uid');
+  if (missing.length) {
+    return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
+  }
+
+  try {
+    // Prevent duplicates by uid or contact_number
+    const [dupe] = await db.promise().query(
+      `SELECT official_id FROM officials
+       WHERE uid = ? OR contact_number = ? LIMIT 1`,
+      [uid, contact_number]
+    );
+    if (dupe.length) {
+      return res.status(409).json({ error: 'An official with this UID or contact already exists' });
+    }
+
+    const [result] = await db.promise().query(
+      `INSERT INTO officials
+         (estate_id, full_name, role, contact_number, estate_urn, uid)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [estate_id, full_name.trim(), role, contact_number, estate_urn, uid]
+    );
+
+    // Invalidate caches
+    await invalidateOfficialCaches(estate_id, uid, contact_number);
+
+    // Best-effort notification (doesn't block response)
+    try {
+      await sendNotification({
+        user_uid: uid,
+        user_type: 'USER',
+        title: 'Official Added',
+        message: `You have been added as ${role}.`,
+        type: 'SYSTEM',
+      });
+    } catch (err) {
+      console.warn('⚠️ Notification failed:', err.message);
+    }
+
+    return res.json({
+      message: 'Official added successfully',
+      officialId: result.insertId,
+    });
+  } catch (err) {
+    console.error('❌ Error adding official:', err.message);
+    return res.status(500).json({ error: 'Failed to add official' });
+  }
+};
+
+// ============================================================
+// GET /officials/getOfficialByEstateId/:estate_id
+// ============================================================
+exports.getOfficialByEstateId = async (req, res) => {
+  const { estate_id } = req.params;
+  const cacheKey = CACHE.byEstate(estate_id);
+
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    if (cachedData) {
+      console.log('🔁 Serving officials from Redis cache');
+      return res.status(200).json(JSON.parse(cachedData));
+    }
+
+    const [results] = await db.promise().query(
+      'SELECT * FROM officials WHERE estate_id = ?',
+      [estate_id]
+    );
+
+    if (!results.length) {
+      return res.status(200).json([]);
+    }
+
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
+    console.log('💾 Officials cached in Redis');
+    return res.status(200).json(results);
+  } catch (error) {
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ============================================================
+// GET /officials/getOfficialByContact/:phone
+// ============================================================
+exports.getOfficialByContact = async (req, res) => {
+  const { phone } = req.params;
+  const cacheKey = CACHE.byContact(phone);
+
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    if (cachedData) {
+      console.log('🔁 Serving official from Redis cache');
+      return res.status(200).json(JSON.parse(cachedData));
+    }
+
+    const [results] = await db.promise().query(
+      'SELECT * FROM officials WHERE contact_number = ? LIMIT 1',
+      [phone]
+    );
+
+    if (!results.length) {
+      return res.status(404).json({ message: 'Official not found' });
+    }
+
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(results[0]));
+    return res.status(200).json(results[0]);
+  } catch (error) {
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ============================================================
+// GET /officials/getOfficialById/:uid
+// ============================================================
+exports.getOfficialById = async (req, res) => {
+  const { uid } = req.params;
+
+  if (!uid) {
+    return res.status(400).json({ error: 'uid is required' });
+  }
+
+  const cacheKey = CACHE.byUid(uid);
+
+  try {
+    const cachedResult = await redisClient.get(cacheKey);
+    if (cachedResult) {
+      console.log('🔁 Serving official from Redis cache');
+      return res.status(200).json(JSON.parse(cachedResult));
+    }
+
+    const [results] = await db.promise().query(
+      `SELECT official_id, estate_id, full_name, role, contact_number,
+              estate_urn, uid, created_at, updated_at
+       FROM officials
+       WHERE uid = ?
+       LIMIT 1`,
+      [uid]
+    );
+
+    if (!results.length) {
+      return res.status(404).json({ message: 'Official not found' });
+    }
+
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(results[0]));
+    console.log('💾 Cached official data by UID');
+    return res.status(200).json(results[0]);
+  } catch (error) {
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ============================================================
+// GET /officials/search?query=
+// ============================================================
+exports.searchOfficials = async (req, res) => {
+  const { query } = req.query;
+
+  if (!query) {
+    return res.status(400).json({ error: 'Search query is required' });
+  }
+
+  const cacheKey = CACHE.search(query);
+
+  try {
+    const cachedResults = await redisClient.get(cacheKey);
+    if (cachedResults) {
+      console.log('🔁 Serving search results from Redis cache');
+      return res.status(200).json(JSON.parse(cachedResults));
+    }
+
+    const [results] = await db.promise().query(
+      `SELECT full_name, role, contact_number
+       FROM officials
+       WHERE MATCH(full_name, role, contact_number) AGAINST(? IN NATURAL LANGUAGE MODE)`,
+      [query]
+    );
+
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
+    return res.status(200).json(results);
+  } catch (error) {
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ============================================================
+// PATCH /officials/update_official/:id
+// Body: { full_name?, role?, contact_number? }
+// ============================================================
+exports.updateOfficial = async (req, res) => {
+  const { id } = req.params;
+  const fields = req.body || {};
+
+  if (!id) return res.status(400).json({ error: 'official ID is required' });
+  if (!Object.keys(fields).length) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
+
+  // Whitelist updatable columns
+  const allowed = ['full_name', 'role', 'contact_number'];
+  const updates = {};
+  for (const k of allowed) {
+    if (fields[k] !== undefined && fields[k] !== null && fields[k] !== '') {
+      updates[k] = fields[k];
+    }
+  }
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  try {
+    // Fetch for cache invalidation
+    const [[existing]] = await db.promise().query(
+      `SELECT estate_id, uid, contact_number FROM officials WHERE official_id = ? LIMIT 1`,
+      [id]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Official not found' });
+    }
+
+    const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+    const values = [...Object.values(updates), id];
+
+    const [result] = await db.promise().query(
+      `UPDATE officials SET ${setters} WHERE official_id = ?`,
+      values
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: 'Official not found' });
+    }
+
+    await invalidateOfficialCaches(
+      existing.estate_id,
+      existing.uid,
+      existing.contact_number
+    );
+
+    return res.json({ message: 'Official updated successfully' });
+  } catch (err) {
+    console.error('Database Error:', err.message);
+    return res.status(500).json({ error: 'Failed to update official' });
+  }
+};
+
+// ============================================================
+// PUT /officials/delete_official/:contact_number
+// (kept as PUT for backward-compat with the frontend)
+// ============================================================
+exports.deleteOfficial = async (req, res) => {
+  const { id } = req.params;
+
+  if (!id) {
+    return res.status(400).json({ error: 'contact_number is required' });
+  }
+
+  try {
+    // Fetch for cache invalidation
+    const [[existing]] = await db.promise().query(
+      `SELECT official_id, estate_id, uid FROM officials WHERE contact_number = ? LIMIT 1`,
+      [id]
+    );
+    if (!existing) {
+      return res.status(404).json({ message: 'Official not found' });
+    }
+
+    await db.promise().query(
+      `DELETE FROM officials WHERE contact_number = ?`,
+      [id]
+    );
+
+    await invalidateOfficialCaches(existing.estate_id, existing.uid, id);
+
+    return res.json({ message: 'Official deleted successfully' });
+  } catch (err) {
+    console.error('Delete official error:', err.message);
+    return res.status(500).json({ error: 'Failed to delete official' });
+  }
+};
+
+// ============================================================
+// GET /officials/existingOfficial/:phone
+// ============================================================
+exports.existingOfficial = async (req, res) => {
+  const { phone } = req.params;
+  const cacheKey = CACHE.exists(phone);
+
+  try {
     const cachedResult = await redisClient.get(cacheKey);
     if (cachedResult) {
       console.log('🔁 Serving official existence from Redis cache');
       return res.status(200).json(JSON.parse(cachedResult));
     }
 
-    // Step 2: Query MySQL if not in cache
-    const query = "SELECT 1 FROM officials WHERE contact_number = ?";
-    db.query(query, [phone], async (err, results) => {
-      if (err) {
-        console.error("❌ Error executing query:", err);
-        return res.status(500).send("Internal Server Error");
-      }
+    const [results] = await db.promise().query(
+      'SELECT 1 FROM officials WHERE contact_number = ? LIMIT 1',
+      [phone]
+    );
 
-      const response = results.length > 0
-        ? { exists: true, message: `UID ${phone} exists.` }
-        : { exists: false, message: `UID ${phone} does not exist.` };
+    const response = results.length
+      ? { exists: true, message: `Official with ${phone} exists.` }
+      : { exists: false, message: `No official with ${phone}.` };
 
-      // Step 3: Cache the result
-      await redisClient.setEx(cacheKey, 300, JSON.stringify(response)); // 5 minutes
-
-      res.json(response);
-    });
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(response));
+    return res.json(response);
   } catch (error) {
-    console.error("❌ Redis error:", error.message);
-    res.status(500).json({ error: "Server error" });
+    console.error('❌ Redis error:', error.message);
+    return res.status(500).json({ error: 'Server error' });
   }
 };
-
-
-
-
-
