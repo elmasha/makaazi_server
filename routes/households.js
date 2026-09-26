@@ -15,6 +15,9 @@ const {
   getHouseholdByPhone,
   getHouseholdByUid,
   getHouseholdById,
+  // ⚡ NEW
+  getAddressDropdowns,
+  getEstateAddressConfig,
   createHousehold,
   updateHouseholdRoles,
   updateHousehold,
@@ -48,6 +51,10 @@ router.get('/by-address',                           getHouseholdsByAddress);
 router.get('/search',                               searchHouseholds);
 router.get('/searchExisting/:phone',                existingHousehold);
 router.get('/getOfficials/:is_official',            getOfficials);
+
+// ---- Address dropdowns (⚡ NEW — must be before /:id routes) ----
+router.get('/address-dropdowns/:estate_id',         getAddressDropdowns);
+router.get('/address-config/:estate_id',            getEstateAddressConfig);
 
 // ---- Estate-scoped reads ----
 router.get('/getBHsHldEstId/:id',                   getHsHlByEstateId);

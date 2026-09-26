@@ -20,6 +20,7 @@ const CACHE = {
   active:     (flag)   => `households:active:${flag}`,
   activeEstate: (flag, e) => `households:active:${flag}:estate:${e}`,
   officials:  (flag)   => `households:officials:${flag}`,
+  dropdowns:     (e)   => `estate:${e}:dropdowns`,
 };
 
 async function invalidateHouseholdCaches(estateId, pk, uid) {
@@ -31,6 +32,7 @@ async function invalidateHouseholdCaches(estateId, pk, uid) {
     CACHE.officials(0), CACHE.officials(1),
     CACHE.byPk(pk),
     CACHE.byUid(uid),
+    CACHE.dropdowns(estateId),
   ];
   await Promise.all(keys.map((k) => redisClient.del(k)));
 }
@@ -338,6 +340,91 @@ exports.getHsHlByEstateId = async (req, res) => {
 };
 
 // ==================================================================
+// ADDRESS DROPDOWNS (for registration + filters)
+// ==================================================================
+
+/**
+ * GET /households/address-dropdowns/:estate_id
+ * Returns the section / court / street lists for an estate.
+ * Used by the registration form and filter controls.
+ */
+exports.getAddressDropdowns = async (req, res) => {
+  const { estate_id } = req.params;
+
+  if (!estate_id) {
+    return res.status(400).json({ error: 'estate_id is required' });
+  }
+
+  const cacheKey = CACHE.dropdowns(estate_id);
+
+  try {
+    const cached = await redisClient.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+
+    const [sections] = await db.promise().query(
+      `SELECT section_name FROM estate_sections
+       WHERE estate_id = ? AND active = 1
+       ORDER BY section_name`,
+      [estate_id]
+    );
+    const [courts] = await db.promise().query(
+      `SELECT court_name FROM estate_courts
+       WHERE estate_id = ? AND active = 1
+       ORDER BY court_name`,
+      [estate_id]
+    );
+    const [streets] = await db.promise().query(
+      `SELECT street_name FROM estate_streets
+       WHERE estate_id = ? AND active = 1
+       ORDER BY street_name`,
+      [estate_id]
+    );
+
+    const result = {
+      estate_id: Number(estate_id),
+      sections: sections.map((r) => r.section_name),
+      courts:   courts.map((r) => r.court_name),
+      streets:  streets.map((r) => r.street_name),
+    };
+
+    await redisClient.setEx(cacheKey, 300, JSON.stringify(result));
+    return res.json(result);
+  } catch (err) {
+    console.error('getAddressDropdowns error:', err.message);
+    return res.status(500).json({ error: 'Failed to load address options' });
+  }
+};
+
+/**
+ * GET /households/address-config/:estate_id
+ * Returns which address components are visible for an estate.
+ */
+exports.getEstateAddressConfig = async (req, res) => {
+  const { estate_id } = req.params;
+
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT show_street, show_section, show_court
+       FROM estate_address_config WHERE estate_id = ? LIMIT 1`,
+      [estate_id]
+    );
+
+    if (!rows.length) {
+      return res.json({
+        show_street: true,
+        show_section: true,
+        show_court: true,
+      });
+    }
+
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('getEstateAddressConfig error:', err.message);
+    return res.status(500).json({ error: 'Failed to load estate config' });
+  }
+};
+
+// ==================================================================
 // WRITES
 // ==================================================================
 
@@ -350,10 +437,9 @@ exports.createHousehold = async (req, res) => {
     section, court, street,
     is_official = 0, official_role = null,
     take_on_balance = 0,
-    uid,                        // Firebase UID if known
+    uid,
   } = req.body;
 
-  // ----- Validation (per Makaazi.docx §2.2) -----
   const missing = [];
   if (!estate_id)        missing.push('estate_id');
   if (!primary_owner)    missing.push('primary_owner');
@@ -381,7 +467,6 @@ exports.createHousehold = async (req, res) => {
   }
 
   try {
-    // Look up estate URN prefix
     const [estates] = await db.promise().query(
       `SELECT estate_id, estate_urn FROM estates WHERE estate_id = ? LIMIT 1`,
       [estate_id]
@@ -390,7 +475,6 @@ exports.createHousehold = async (req, res) => {
       return res.status(404).json({ error: 'Estate not found' });
     }
 
-    // Phone uniqueness within estate
     const [dupe] = await db.promise().query(
       `SELECT household_id FROM households
        WHERE contact_number = ? AND estate_id = ? LIMIT 1`,
@@ -402,7 +486,6 @@ exports.createHousehold = async (req, res) => {
       });
     }
 
-    // URN generation
     let householdUrn = uid || null;
     if (!householdUrn) {
       let collision = true, attempts = 0;
@@ -438,7 +521,6 @@ exports.createHousehold = async (req, res) => {
 
     const [result] = await db.promise().query(sql, values);
 
-    // Also seed this year's household_payments row
     const year = new Date().getFullYear();
     await db.promise().query(
       `INSERT INTO household_payments
@@ -455,7 +537,6 @@ exports.createHousehold = async (req, res) => {
        year, tob, householdUrn]
     );
 
-    // Invalidate caches
     await invalidateHouseholdCaches(estate_id, result.insertId, householdUrn);
 
     return res.status(201).json({
@@ -485,7 +566,6 @@ exports.updateHouseholdRoles = async (req, res) => {
       return res.status(404).json({ error: 'Household not found' });
     }
 
-    // Look up estate/uid for cache invalidation
     const [[h]] = await db.promise().query(
       `SELECT estate_id, uid FROM households WHERE household_id = ?`,
       [household_id]
@@ -536,7 +616,6 @@ exports.updateHousehold = async (req, res) => {
     return res.status(400).json({ error: 'No fields to update' });
   }
 
-  // Disallow edits to immutable / sensitive columns
   const blocked = ['household_id', 'uid', 'created_at', 'approved_by', 'approved_at'];
   for (const k of blocked) delete fields[k];
 
@@ -574,7 +653,6 @@ exports.deleteHousehold = async (req, res) => {
   const { id } = req.params;
 
   try {
-    // Fetch for cache invalidation before deleting
     const [[h]] = await db.promise().query(
       `SELECT estate_id, uid FROM households WHERE household_id = ?`,
       [id]
