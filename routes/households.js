@@ -17,9 +17,9 @@ const {
   getHouseholdById,
   getAddressDropdowns,
   getEstateAddressConfig,
-  getHouseholdPayments,          // ⚡ NEW
-  createHousehold,
+  getHouseholdPayments,
   getEstateHouseholdList,
+  createHousehold,
   updateHouseholdRoles,
   updateHousehold,
   deleteHousehold,
@@ -40,7 +40,7 @@ const {
 } = require('../controllers/householdDashboardController');
 
 // ============================================================
-// ORDER MATTERS — static/scoped first, /:id last
+// ORDER MATTERS — static/scoped before /:id catch-alls
 // ============================================================
 
 // ---- Self-registration (resident) ----
@@ -57,8 +57,11 @@ router.get('/dashboard/:uid',                       getHouseholdDashboard);
 router.get('/dashboard/pk/:householdId',            getHouseholdDashboardById);
 router.get('/payment-summary/:uid',                 getPaymentSummary);
 
-// ⚡ ---- Household payments (resident) ----
+// ---- Household payments (resident) ----
 router.get('/:householdId/payments',                getHouseholdPayments);
+
+// ---- Estate household list (official) ----
+router.get('/estate/:estateId/households/list',     getEstateHouseholdList);
 
 // ---- Static reads ----
 router.get('/getAll',                               getAllHouseholds);
@@ -87,10 +90,5 @@ router.post('/addHousehold',                        createHousehold);
 router.patch('/update_household/:id',               updateHousehold);
 router.post('/updateRoles/:id',                     updateHouseholdRoles);
 router.delete('/deleteHousehold/:id',               deleteHousehold);
-
-
-// Place BEFORE any /:id catch-all
-router.get('/estate/:estateId/households/list', getEstateHouseholdList);
-
 
 module.exports = router;

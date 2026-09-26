@@ -1,11 +1,11 @@
-// controllers/households/households.js
+// controllers/householdsController.js
 const db = require('../config/db');
 const redisClient = require('../config/redis');
 const { generateHouseholdUrn } = require('../utils/billing');
 const { sendNotification } = require('../utils/notify');
 
 // ------------------------------------------------------------------
-// Cache key helpers — keep them consistent so invalidation works
+// Cache keys — consistent across read/write for clean invalidation
 // ------------------------------------------------------------------
 const CACHE = {
   all:                'households:all',
@@ -37,44 +37,15 @@ async function invalidateHouseholdCaches(estateId, pk, uid) {
   await Promise.all(keys.map((k) => redisClient.del(k)));
 }
 
+function normalizeBool(v) {
+  if (v === 1 || v === '1' || v === true  || v === 'true')  return 1;
+  if (v === 0 || v === '0' || v === false || v === 'false') return 0;
+  return null;
+}
+
 // ==================================================================
 // READS
 // ==================================================================
-
-
-// ==================================================================
-// HOUSEHOLD PAYMENTS (per-household transaction log)
-// ==================================================================
-
-/**
- * GET /households/:householdId/payments
- * Returns all payments for a household, newest first.
- */
-exports.getHouseholdPayments = async (req, res) => {
-  const { householdId } = req.params;
-
-  if (!householdId) {
-    return res.status(400).json({ error: 'householdId is required' });
-  }
-
-  try {
-    const [rows] = await db.promise().query(
-      `SELECT payment_id, household_id, estate_id, charge_id,
-              amount_paid, payment_method, transaction_id,
-              payment_status, payment_date, receipt_url, created_at
-       FROM payments
-       WHERE household_id = ?
-       ORDER BY payment_date DESC, payment_id DESC`,
-      [householdId]
-    );
-
-    return res.json(rows);
-  } catch (err) {
-    console.error('getHouseholdPayments error:', err.message);
-    return res.status(500).json({ error: 'Failed to fetch payments' });
-  }
-};
-
 
 // GET /households/by-address?estate_id=&section=&street=&court=
 exports.getHouseholdsByAddress = async (req, res) => {
@@ -132,7 +103,7 @@ exports.getAllHouseholds = async (req, res) => {
   }
 };
 
-// GET /households/uid/:uid   ← resolve by Firebase UID (what the app has)
+// GET /households/getHouseHoldId/:uid  ← resolve by Firebase UID
 exports.getHouseholdByUid = async (req, res) => {
   const { uid } = req.params;
   const cacheKey = CACHE.byUid(uid);
@@ -156,7 +127,7 @@ exports.getHouseholdByUid = async (req, res) => {
   }
 };
 
-// GET /households/:id   ← resolve by primary key
+// GET /households/getHousehold/:id  ← resolve by primary key
 exports.getHouseholdById = async (req, res) => {
   const { id } = req.params;
   const cacheKey = CACHE.byPk(id);
@@ -180,7 +151,7 @@ exports.getHouseholdById = async (req, res) => {
   }
 };
 
-// GET /households/estate/:estateId/phone/:phone
+// GET /households/getHouseHoldByPhone/:estateId/:phone
 exports.getHouseholdByPhone = async (req, res) => {
   const { estateId, phone } = req.params;
   const cacheKey = CACHE.byPhone(estateId, phone);
@@ -206,7 +177,7 @@ exports.getHouseholdByPhone = async (req, res) => {
   }
 };
 
-// GET /households/estate/:id/search?query=
+// GET /households/searchEstate/:id?query=
 exports.searchHouseholdsId = async (req, res) => {
   const { id } = req.params;
   const { query } = req.query;
@@ -269,7 +240,7 @@ exports.searchHouseholds = async (req, res) => {
   }
 };
 
-// GET /households/active/:active
+// GET /households/getActiveaddHouseHold/:active
 exports.getActiveHouseHolds = async (req, res) => {
   const flag = normalizeBool(req.params.active);
   if (flag === null) {
@@ -296,7 +267,7 @@ exports.getActiveHouseHolds = async (req, res) => {
   }
 };
 
-// GET /households/active/:active/estate/:estate_id
+// GET /households/getActiveEstate/:active/:estate_id
 exports.getActiveEstate = async (req, res) => {
   const flag = normalizeBool(req.params.active);
   const { estate_id } = req.params;
@@ -324,7 +295,7 @@ exports.getActiveEstate = async (req, res) => {
   }
 };
 
-// GET /households/officials/:flag   ← flag 0|1
+// GET /households/getOfficials/:is_official
 exports.getOfficials = async (req, res) => {
   const flag = normalizeBool(req.params.is_official);
   if (flag === null) {
@@ -351,7 +322,7 @@ exports.getOfficials = async (req, res) => {
   }
 };
 
-// GET /households/estate/:id
+// GET /households/getBHsHldEstId/:id  ← approved households by estate
 exports.getHsHlByEstateId = async (req, res) => {
   const { id } = req.params;
   const cacheKey = CACHE.byEstate(id);
@@ -363,7 +334,7 @@ exports.getHsHlByEstateId = async (req, res) => {
     const [rows] = await db.promise().query(
       `SELECT * FROM households
        WHERE estate_id = ? AND status = 'Approved'
-       ORDER BY created_at DESC`,
+       ORDER BY section, court, street, house_number`,
       [id]
     );
     await redisClient.setEx(cacheKey, 300, JSON.stringify(rows));
@@ -375,14 +346,131 @@ exports.getHsHlByEstateId = async (req, res) => {
 };
 
 // ==================================================================
-// ADDRESS DROPDOWNS (for registration + filters)
+// HOUSEHOLD PAYMENTS (per-household transaction log)
 // ==================================================================
 
-/**
- * GET /households/address-dropdowns/:estate_id
- * Returns the section / court / street lists for an estate.
- * Used by the registration form and filter controls.
- */
+// GET /households/:householdId/payments
+exports.getHouseholdPayments = async (req, res) => {
+  const { householdId } = req.params;
+
+  if (!householdId) {
+    return res.status(400).json({ error: 'householdId is required' });
+  }
+
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT payment_id, household_id, estate_id, charge_id,
+              amount_paid, payment_method, transaction_id,
+              payment_status, payment_date, receipt_url, created_at
+       FROM payments
+       WHERE household_id = ?
+       ORDER BY payment_date DESC, payment_id DESC`,
+      [householdId]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('getHouseholdPayments error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+};
+
+// ==================================================================
+// ESTATE HOUSEHOLD LIST (official payment summary table)
+// GET /households/estate/:estateId/households/list?year=YYYY
+// ==================================================================
+exports.getEstateHouseholdList = async (req, res) => {
+  const { estateId } = req.params;
+  const year = parseInt(req.query.year) || new Date().getFullYear();
+
+  if (!estateId) {
+    return res.status(400).json({ error: 'estateId is required' });
+  }
+
+  try {
+    // 1. Sum monthly-frequency charges for this estate
+    const [rates] = await db.promise().query(
+      `SELECT COALESCE(SUM(amount), 0) AS rate
+       FROM service_charges
+       WHERE estate_id = ? AND frequency = 'Monthly'`,
+      [estateId]
+    );
+    const monthlyRate = Number(rates[0]?.rate || 0);
+    const monthsElapsed = new Date().getMonth() + 1;
+
+    // 2. Pull every approved household + their payment row
+    const [rows] = await db.promise().query(
+      `SELECT
+         h.household_id, h.uid, h.primary_owner, h.contact_number, h.house_number,
+         h.section, h.street, h.court, h.active, h.take_on_balance,
+         COALESCE(hp.balance_brought_forward, h.take_on_balance, 0) AS bf,
+         COALESCE(hp.total_paid, 0) AS total_paid,
+         hp.january, hp.february, hp.march, hp.april,
+         hp.may, hp.june, hp.july, hp.august,
+         hp.september, hp.october, hp.november, hp.december
+       FROM households h
+       LEFT JOIN household_payments hp
+         ON hp.household_id = h.household_id AND hp.year = ?
+       WHERE h.estate_id = ? AND h.status = 'Approved'
+       ORDER BY h.section, h.court, h.street, h.house_number`,
+      [year, estateId]
+    );
+
+    // 3. Compute status + shape response
+    const results = rows.map((r) => {
+      const bf = Number(r.bf || 0);
+      const paid = Number(r.total_paid || 0);
+      const dueToDate = bf + monthlyRate * monthsElapsed;
+      const overdue = Math.max(0, dueToDate - paid);
+      const prepaid = Math.max(0, paid - dueToDate);
+
+      let status = 'Paid';
+      if (overdue > 0) status = 'Overdue';
+      else if (prepaid > 0) status = 'Prepaid';
+
+      return {
+        household_id: r.household_id,
+        primary_owner: r.primary_owner,
+        contact_number: r.contact_number,
+        house_number: r.house_number,
+        section: r.section,
+        court: r.court,
+        street: r.street,
+        balance_brought_forward: bf,
+        total_paid: paid,
+        due_to_date: dueToDate,
+        overdue,
+        prepaid,
+        status,
+        months: {
+          january:   Number(r.january   || 0),
+          february:  Number(r.february  || 0),
+          march:     Number(r.march     || 0),
+          april:     Number(r.april     || 0),
+          may:       Number(r.may       || 0),
+          june:      Number(r.june      || 0),
+          july:      Number(r.july      || 0),
+          august:    Number(r.august    || 0),
+          september: Number(r.september || 0),
+          october:   Number(r.october   || 0),
+          november:  Number(r.november  || 0),
+          december:  Number(r.december  || 0),
+        },
+      };
+    });
+
+    return res.json(results);
+  } catch (err) {
+    console.error('getEstateHouseholdList error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch estate list' });
+  }
+};
+
+// ==================================================================
+// ADDRESS DROPDOWNS (registration + filters)
+// ==================================================================
+
+// GET /households/address-dropdowns/:estate_id
 exports.getAddressDropdowns = async (req, res) => {
   const { estate_id } = req.params;
 
@@ -430,10 +518,7 @@ exports.getAddressDropdowns = async (req, res) => {
   }
 };
 
-/**
- * GET /households/address-config/:estate_id
- * Returns which address components are visible for an estate.
- */
+// GET /households/address-config/:estate_id
 exports.getEstateAddressConfig = async (req, res) => {
   const { estate_id } = req.params;
 
@@ -463,8 +548,7 @@ exports.getEstateAddressConfig = async (req, res) => {
 // WRITES
 // ==================================================================
 
-// POST /households
-// Official registers a household on behalf. Auto-approved.
+// POST /households/addHousehold
 exports.createHousehold = async (req, res) => {
   const {
     estate_id, primary_owner, spouse_name = null, caretaker_name = null,
@@ -586,7 +670,7 @@ exports.createHousehold = async (req, res) => {
   }
 };
 
-// PATCH /households/:id/roles
+// POST /households/updateRoles/:id
 exports.updateHouseholdRoles = async (req, res) => {
   const { household_id, is_official, official_role } = req.body;
   if (!household_id) return res.status(400).json({ error: 'household_id is required' });
@@ -614,7 +698,7 @@ exports.updateHouseholdRoles = async (req, res) => {
   }
 };
 
-// GET /households/exists/:phone?estate_id=
+// GET /households/searchExisting/:phone?estate_id=
 exports.existingHousehold = async (req, res) => {
   const { phone } = req.params;
   const { estate_id } = req.query;
@@ -641,7 +725,7 @@ exports.existingHousehold = async (req, res) => {
   }
 };
 
-// PUT /households/:id
+// PATCH /households/update_household/:id
 exports.updateHousehold = async (req, res) => {
   const { id } = req.params;
   const fields = req.body;
@@ -683,7 +767,7 @@ exports.updateHousehold = async (req, res) => {
   }
 };
 
-// DELETE /households/:id
+// DELETE /households/deleteHousehold/:id
 exports.deleteHousehold = async (req, res) => {
   const { id } = req.params;
 
@@ -706,13 +790,3 @@ exports.deleteHousehold = async (req, res) => {
     return res.status(500).json({ error: 'Server error' });
   }
 };
-
-// ==================================================================
-// Helpers
-// ==================================================================
-
-function normalizeBool(v) {
-  if (v === 1 || v === '1' || v === true  || v === 'true')  return 1;
-  if (v === 0 || v === '0' || v === false || v === 'false') return 0;
-  return null;
-}
