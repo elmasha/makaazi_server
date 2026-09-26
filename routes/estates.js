@@ -30,7 +30,8 @@ const {
 // LIST & SEARCH
 // ============================================================
 router.get('/', getAllEstates);
-router.get('/getAll', getAllEstates); // legacy alias
+router.get('/getAll', getAllEstates);   // camelCase
+router.get('/getall', getAllEstates);   // ← NEW: lowercase alias (frontend uses this)
 router.get('/search', searchEstates);
 router.get('/searchAll', searchAllEstates); // deprecated alias
 
@@ -52,6 +53,7 @@ router.get(
 // ============================================================
 router.get('/estate/:id', getEstateById);
 router.get('/name/:id', getEstateByName);
+router.get('/estateName/:id', getEstateByName);   // ← NEW: alias (frontend uses this)
 router.get('/subscription/:id', getEstateSubById);
 
 // ============================================================
