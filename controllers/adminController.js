@@ -1,21 +1,18 @@
 // controllers/adminController.js
 const db = require('../config/db');
 const redisClient = require('../config/redis');
-
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
+const admin = require('../config/firebaseAdmin');
 
 // ============================================================
-// Helper
+// Helpers
 // ============================================================
 async function logAdminAction(adminEmail, action, entityType, entityId, details) {
   try {
     await db.promise().query(
       `INSERT INTO admin_audit_logs (admin_email, action, entity_type, entity_id, details)
        VALUES (?, ?, ?, ?, ?)`,
-      [adminEmail, action, entityType || null, entityId || null, details ? JSON.stringify(details) : null]
+      [adminEmail, action, entityType || null, entityId || null,
+       details ? JSON.stringify(details) : null]
     );
   } catch (e) {
     console.warn('Audit log failed:', e.message);
@@ -34,38 +31,132 @@ function generateEstateUrn(prefix) {
 
 // ============================================================
 // POST /api/admin/login
-// Body: { email, token }
-// Validates against ADMIN_EMAILS + ADMIN_SHARED_SECRET
+// Body: { id_token }
+// Verifies Firebase ID token, then checks the intec_admins table
 // ============================================================
 exports.adminLogin = async (req, res) => {
-  const { email, token } = req.body;
+  const { id_token } = req.body;
 
-  if (!email || !token) {
-    return res.status(400).json({ error: 'email and token are required' });
+  if (!id_token) {
+    return res.status(400).json({ error: 'id_token is required' });
   }
 
-  const normalized = String(email).toLowerCase().trim();
-
-  if (!ADMIN_EMAILS.includes(normalized)) {
-    return res.status(403).json({ error: 'This email is not authorized for admin access' });
+  // 1. Verify Firebase token
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(id_token);
+  } catch (err) {
+    console.error('adminLogin: token verify failed:', err.message);
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 
-  if (token !== process.env.ADMIN_SHARED_SECRET) {
-    return res.status(403).json({ error: 'Invalid admin token' });
+  const uid = decoded.uid;
+  const email = (decoded.email || '').toLowerCase();
+
+  // 2. Look up in intec_admins
+  let adminRow;
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT id, email, firebase_uid, full_name, role, active
+       FROM intec_admins
+       WHERE firebase_uid = ?
+          OR (firebase_uid IS NULL AND email = ?)
+       LIMIT 1`,
+      [uid, email]
+    );
+    adminRow = rows[0];
+  } catch (err) {
+    console.error('adminLogin DB error:', err.message);
+    return res.status(500).json({ error: 'Server error' });
   }
 
-  await logAdminAction(normalized, 'login', 'admin', null, { ip: req.ip });
+  if (!adminRow) {
+    return res.status(403).json({ error: 'This account is not authorized for admin access' });
+  }
+
+  if (!adminRow.active) {
+    return res.status(403).json({ error: 'This admin account is disabled' });
+  }
+
+  // 3. Auto-bind UID + update last_login_at
+  try {
+    await db.promise().query(
+      `UPDATE intec_admins
+       SET firebase_uid = COALESCE(firebase_uid, ?),
+           last_login_at = NOW()
+       WHERE id = ?`,
+      [uid, adminRow.id]
+    );
+  } catch (e) {
+    console.warn('adminLogin: could not update last_login_at:', e.message);
+  }
+
+  await logAdminAction(adminRow.email, 'login', 'admin', adminRow.id, { uid });
 
   return res.json({
     message: 'Login successful',
-    admin: { email: normalized },
-    token: process.env.ADMIN_SHARED_SECRET,
+    admin: {
+      id: adminRow.id,
+      email: adminRow.email,
+      full_name: adminRow.full_name,
+      role: adminRow.role,
+      uid,
+    },
   });
 };
 
 // ============================================================
+// GET /api/admin/me
+// Returns the current admin (from req.admin set by middleware)
+// ============================================================
+exports.getMe = async (req, res) => {
+  return res.json({ admin: req.admin });
+};
+
+// ============================================================
+// GET /api/admin/public-stats
+// Unauthenticated stats for the login page hero cards
+// ============================================================
+exports.getPublicStats = async (req, res) => {
+  try {
+    const [[{ total_estates }]] = await db.promise().query(
+      `SELECT COUNT(*) AS total_estates FROM estates WHERE status != 'Archived'`
+    );
+    const [[{ active_estates }]] = await db.promise().query(
+      `SELECT COUNT(*) AS active_estates FROM estates WHERE status = 'Active'`
+    );
+    const [[{ total_households }]] = await db.promise().query(
+      `SELECT COUNT(*) AS total_households FROM households WHERE status = 'Approved'`
+    );
+    const [[{ pending_households }]] = await db.promise().query(
+      `SELECT COUNT(*) AS pending_households FROM households WHERE status = 'Pending'`
+    );
+    const [[{ total_officials }]] = await db.promise().query(
+      `SELECT COUNT(*) AS total_officials FROM officials`
+    );
+    const [[{ collected_this_year }]] = await db.promise().query(
+      `SELECT COALESCE(SUM(amount_paid), 0) AS collected_this_year
+       FROM payments
+       WHERE payment_status = 'Completed' AND YEAR(payment_date) = YEAR(CURDATE())`
+    );
+
+    return res.json({
+      total_estates,
+      active_estates,
+      total_households,
+      pending_households,
+      total_officials,
+      collected_this_year: Number(collected_this_year),
+    });
+  } catch (err) {
+    console.error('getPublicStats error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+};
+
+// ============================================================
 // GET /api/admin/stats
-// Platform-wide numbers for the dashboard
+// Full stats (admin only — includes total_collected, active_subs)
 // ============================================================
 exports.getPlatformStats = async (req, res) => {
   try {
@@ -115,8 +206,6 @@ exports.getPlatformStats = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/estates
-// List all estates with their key stats
-// Query: ?search=&status=
 // ============================================================
 exports.listEstates = async (req, res) => {
   const { search, status } = req.query;
@@ -163,7 +252,6 @@ exports.listEstates = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/estates/:id
-// Single estate with full details
 // ============================================================
 exports.getEstate = async (req, res) => {
   const { id } = req.params;
@@ -225,14 +313,6 @@ exports.getEstate = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/estates
-// Create estate (with address config) in ONE transaction
-// Body:
-// {
-//   estate_name, estate_location, latitude, longitude,
-//   urn_prefix, welfare_mandatory,
-//   estate_image, logo_url,
-//   address_config: { show_street, show_section, show_court, show_house_number }
-// }
 // ============================================================
 exports.createEstate = async (req, res) => {
   const {
@@ -315,7 +395,6 @@ exports.createEstate = async (req, res) => {
 
 // ============================================================
 // PATCH /api/admin/estates/:id
-// Update estate basics
 // ============================================================
 exports.updateEstate = async (req, res) => {
   const { id } = req.params;
@@ -364,7 +443,6 @@ exports.updateEstate = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/estates/:id/status
-// Body: { status: 'Active' | 'Inactive' | 'Archived' }
 // ============================================================
 exports.setEstateStatus = async (req, res) => {
   const { id } = req.params;
@@ -394,7 +472,6 @@ exports.setEstateStatus = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/estates/:id/address-config
-// Upsert address config flags
 // ============================================================
 exports.setAddressConfig = async (req, res) => {
   const { id } = req.params;
@@ -435,8 +512,6 @@ exports.setAddressConfig = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/estates/:id/charges
-// Add a service charge
-// Body: { charge_type, frequency, amount }
 // ============================================================
 exports.addCharge = async (req, res) => {
   const { id } = req.params;
@@ -485,9 +560,7 @@ exports.deleteCharge = async (req, res) => {
 };
 
 // ============================================================
-// POST /api/admin/estates/:id/sections
-// POST /api/admin/estates/:id/courts
-// POST /api/admin/estates/:id/streets
+// POST /api/admin/estates/:id/sections|courts|streets
 // ============================================================
 exports.addSection = async (req, res) => {
   const { id } = req.params;
@@ -551,8 +624,6 @@ exports.addStreet = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/estates/:id/first-official
-// Creates the first Chairman official
-// Body: { full_name, contact_number, uid, email? }
 // ============================================================
 exports.createFirstOfficial = async (req, res) => {
   const { id } = req.params;
@@ -592,7 +663,6 @@ exports.createFirstOfficial = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/audit-logs
-// Recent admin actions
 // ============================================================
 exports.getAuditLogs = async (req, res) => {
   try {
@@ -603,5 +673,146 @@ exports.getAuditLogs = async (req, res) => {
   } catch (err) {
     console.error('getAuditLogs error:', err.message);
     return res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+};
+
+// ============================================================
+// ADMINS MANAGEMENT (super admin only)
+// ============================================================
+
+/**
+ * GET /api/admin/admins
+ */
+exports.listAdmins = async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT id, email, firebase_uid, full_name, role, active, last_login_at, created_at
+       FROM intec_admins
+       ORDER BY created_at DESC`
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('listAdmins error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch admins' });
+  }
+};
+
+/**
+ * POST /api/admin/admins
+ * Body: { email, full_name, role, firebase_uid? }
+ */
+exports.addAdmin = async (req, res) => {
+  const { email, full_name = null, role = 'support', firebase_uid = null } = req.body;
+
+  if (!email) return res.status(400).json({ error: 'email is required' });
+
+  const normalized = String(email).toLowerCase().trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+  if (!['super', 'support', 'readonly'].includes(role)) {
+    return res.status(400).json({ error: 'Invalid role' });
+  }
+
+  try {
+    const [result] = await db.promise().query(
+      `INSERT INTO intec_admins (email, firebase_uid, full_name, role, active)
+       VALUES (?, ?, ?, ?, 1)`,
+      [normalized, firebase_uid || null, full_name, role]
+    );
+
+    await logAdminAction(req.admin?.email, 'add_admin', 'admin', result.insertId, {
+      email: normalized,
+      role,
+    });
+
+    return res.status(201).json({
+      message: 'Admin added',
+      id: result.insertId,
+      email: normalized,
+      role,
+    });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'This email is already an admin' });
+    }
+    console.error('addAdmin error:', err.message);
+    return res.status(500).json({ error: 'Failed to add admin' });
+  }
+};
+
+/**
+ * PATCH /api/admin/admins/:id
+ * Body: { role?, active?, full_name?, firebase_uid? }
+ */
+exports.updateAdmin = async (req, res) => {
+  const { id } = req.params;
+  const { role, active, full_name, firebase_uid } = req.body;
+
+  const updates = {};
+  if (role !== undefined) {
+    if (!['super', 'support', 'readonly'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+    updates.role = role;
+  }
+  if (active !== undefined) updates.active = active ? 1 : 0;
+  if (full_name !== undefined) updates.full_name = full_name;
+  if (firebase_uid !== undefined) updates.firebase_uid = firebase_uid || null;
+
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+  const values = [...Object.values(updates), id];
+
+  try {
+    const [result] = await db.promise().query(
+      `UPDATE intec_admins SET ${setters} WHERE id = ?`,
+      values
+    );
+    if (!result.affectedRows) return res.status(404).json({ error: 'Admin not found' });
+
+    await logAdminAction(req.admin?.email, 'update_admin', 'admin', Number(id), updates);
+
+    return res.json({ message: 'Admin updated' });
+  } catch (err) {
+    console.error('updateAdmin error:', err.message);
+    return res.status(500).json({ error: 'Failed to update admin' });
+  }
+};
+
+/**
+ * DELETE /api/admin/admins/:id
+ * Soft delete (active = 0). Cannot remove yourself.
+ */
+exports.removeAdmin = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [[target]] = await db.promise().query(
+      `SELECT email FROM intec_admins WHERE id = ?`,
+      [id]
+    );
+    if (!target) return res.status(404).json({ error: 'Admin not found' });
+
+    if (target.email === req.admin?.email) {
+      return res.status(400).json({ error: 'You cannot remove your own admin account' });
+    }
+
+    await db.promise().query(
+      `UPDATE intec_admins SET active = 0 WHERE id = ?`,
+      [id]
+    );
+
+    await logAdminAction(req.admin?.email, 'remove_admin', 'admin', Number(id), {
+      email: target.email,
+    });
+
+    return res.json({ message: 'Admin removed' });
+  } catch (err) {
+    console.error('removeAdmin error:', err.message);
+    return res.status(500).json({ error: 'Failed to remove admin' });
   }
 };

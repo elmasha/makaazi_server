@@ -2,15 +2,24 @@
 const express = require('express');
 const router = express.Router();
 const adminAuth = require('../middleware/adminAuth');
+const { requireRole } = adminAuth;
 const ctrl = require('../controllers/adminController');
 
-// Public — login only
+// ============================================================
+// PUBLIC (no auth)
+// ============================================================
 router.post('/login', ctrl.adminLogin);
+router.get('/public-stats', ctrl.getPublicStats);
 
-// Everything below requires admin token
+// ============================================================
+// AUTHENTICATED (any admin)
+// ============================================================
 router.use(adminAuth);
 
-// Stats
+// Identity
+router.get('/me', ctrl.getMe);
+
+// Platform stats
 router.get('/stats', ctrl.getPlatformStats);
 
 // Estates
@@ -29,7 +38,15 @@ router.post('/estates/:id/first-official', ctrl.createFirstOfficial);
 // Charges
 router.delete('/charges/:chargeId', ctrl.deleteCharge);
 
-// Audit
+// Audit — any admin can read
 router.get('/audit-logs', ctrl.getAuditLogs);
+
+// ============================================================
+// SUPER-ADMIN ONLY
+// ============================================================
+router.get('/admins', requireRole('super'), ctrl.listAdmins);
+router.post('/admins', requireRole('super'), ctrl.addAdmin);
+router.patch('/admins/:id', requireRole('super'), ctrl.updateAdmin);
+router.delete('/admins/:id', requireRole('super'), ctrl.removeAdmin);
 
 module.exports = router;
