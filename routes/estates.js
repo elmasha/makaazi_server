@@ -64,4 +64,19 @@ router.post('/createConfig', createEstateConfig); // deprecated, use /create
 router.patch('/update_estate/:id', updateEstate);
 router.delete('/delete/:id', deleteEstate);
 
+// routes/estates.js (or wherever your public estate routes live)
+router.get('/subscription-plans', async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT plan_id, plan_name, min_households, max_households, monthly_rate
+       FROM subscription_plans
+       ORDER BY min_households ASC`
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('public subscription-plans error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch plans' });
+  }
+});
+
 module.exports = router;
