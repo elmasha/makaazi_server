@@ -740,6 +740,91 @@ exports.listOfficials = async (req, res) => {
 };
 
 // ============================================================
+// GET /api/admin/officials/:id
+// Fetch a single official with estate info
+// ============================================================
+exports.getOfficial = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [[row]] = await db.promise().query(
+      `SELECT
+         o.official_id,
+         o.estate_id,
+         o.full_name,
+         o.role,
+         o.contact_number,
+         o.uid,
+         o.official_unique_id,
+         o.estate_urn,
+         o.created_at,
+         o.updated_at,
+         e.estate_name,
+         e.estate_urn AS estate_urn_full,
+         e.estate_location
+       FROM officials o
+       LEFT JOIN estates e ON e.estate_id = o.estate_id
+       WHERE o.official_id = ?
+       LIMIT 1`,
+      [id]
+    );
+
+    if (!row) {
+      return res.status(404).json({ error: 'Official not found' });
+    }
+
+    return res.json(row);
+  } catch (err) {
+    console.error('getOfficial error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch official' });
+  }
+};
+
+// ============================================================
+// PATCH /api/admin/officials/:id
+// Body: { full_name?, contact_number?, role?, uid? }
+// ============================================================
+exports.updateOfficial = async (req, res) => {
+  const { id } = req.params;
+  const { full_name, contact_number, role, uid } = req.body;
+
+  const updates = {};
+  if (full_name !== undefined) updates.full_name = full_name;
+  if (contact_number !== undefined) updates.contact_number = contact_number;
+  if (role !== undefined) updates.role = role;
+  if (uid !== undefined) updates.uid = uid || null;
+
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+  const values = [...Object.values(updates), id];
+
+  try {
+    const [result] = await db.promise().query(
+      `UPDATE officials SET ${setters} WHERE official_id = ?`,
+      values
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: 'Official not found' });
+    }
+
+    await logAdminAction(req.admin?.email, 'update_official', 'official', Number(id), updates);
+
+    return res.json({ message: 'Official updated' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        error: 'Another official already uses this phone number or UID',
+      });
+    }
+    console.error('updateOfficial error:', err.message);
+    return res.status(500).json({ error: 'Failed to update official' });
+  }
+};
+
+// ============================================================
 // DELETE /api/admin/officials/:id
 // ============================================================
 exports.deleteOfficial = async (req, res) => {

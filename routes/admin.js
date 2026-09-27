@@ -56,6 +56,8 @@ router.delete('/charges/:chargeId', ctrl.deleteCharge);
 // Officials (cross-estate)
 // ------------------------------------------------------------
 router.get('/officials', ctrl.listOfficials);
+router.get('/officials/:id', ctrl.getOfficial);          // ← single official
+router.patch('/officials/:id', ctrl.updateOfficial);     // ← edit official
 router.delete('/officials/:id', ctrl.deleteOfficial);
 
 // ------------------------------------------------------------
