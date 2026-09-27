@@ -1,5 +1,5 @@
 // middleware/adminAuth.js
-const admin = require('../config/fcm');
+const admin = require('../config/firebaseAdmin');
 const db = require('../config/db');
 
 /**
