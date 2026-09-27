@@ -32,7 +32,6 @@ function generateEstateUrn(prefix) {
 // ============================================================
 // POST /api/admin/login
 // Body: { id_token }
-// Verifies Firebase ID token, then checks the intec_admins table
 // ============================================================
 exports.adminLogin = async (req, res) => {
   const { id_token } = req.body;
@@ -41,7 +40,6 @@ exports.adminLogin = async (req, res) => {
     return res.status(400).json({ error: 'id_token is required' });
   }
 
-  // 1. Verify Firebase token
   let decoded;
   try {
     decoded = await admin.auth().verifyIdToken(id_token);
@@ -53,7 +51,6 @@ exports.adminLogin = async (req, res) => {
   const uid = decoded.uid;
   const email = (decoded.email || '').toLowerCase();
 
-  // 2. Look up in intec_admins
   let adminRow;
   try {
     const [rows] = await db.promise().query(
@@ -73,12 +70,10 @@ exports.adminLogin = async (req, res) => {
   if (!adminRow) {
     return res.status(403).json({ error: 'This account is not authorized for admin access' });
   }
-
   if (!adminRow.active) {
     return res.status(403).json({ error: 'This admin account is disabled' });
   }
 
-  // 3. Auto-bind UID + update last_login_at
   try {
     await db.promise().query(
       `UPDATE intec_admins
@@ -107,7 +102,6 @@ exports.adminLogin = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/me
-// Returns the current admin (from req.admin set by middleware)
 // ============================================================
 exports.getMe = async (req, res) => {
   return res.json({ admin: req.admin });
@@ -115,7 +109,6 @@ exports.getMe = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/public-stats
-// Unauthenticated stats for the login page hero cards
 // ============================================================
 exports.getPublicStats = async (req, res) => {
   try {
@@ -156,15 +149,14 @@ exports.getPublicStats = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/stats
-// Full stats (admin only — includes total_collected, active_subs)
 // ============================================================
 exports.getPlatformStats = async (req, res) => {
   try {
     const [[{ total_estates }]] = await db.promise().query(
-      `SELECT COUNT(*) AS total_estates FROM estates WHERE status != 'Archived'`
+      `SELECT COUNT(*) AS total_estates FROM estates`
     );
     const [[{ active_estates }]] = await db.promise().query(
-      `SELECT COUNT(*) AS active_estates FROM estates WHERE status = 'Active'`
+      `SELECT COUNT(*) AS active_estates FROM estates`
     );
     const [[{ total_households }]] = await db.promise().query(
       `SELECT COUNT(*) AS total_households FROM households WHERE status = 'Approved'`
@@ -187,6 +179,12 @@ exports.getPlatformStats = async (req, res) => {
     const [[{ active_subs }]] = await db.promise().query(
       `SELECT COUNT(*) AS active_subs FROM estate_subscriptions WHERE is_active = 1`
     );
+    const [[{ total_residents }]] = await db.promise().query(
+      `SELECT COUNT(*) AS total_residents FROM households WHERE active = 1`
+    );
+    const [[{ pending_subs }]] = await db.promise().query(
+      `SELECT COUNT(*) AS pending_subs FROM estate_subscriptions WHERE payment_status = 'Pending'`
+    );
 
     return res.json({
       total_estates,
@@ -194,9 +192,11 @@ exports.getPlatformStats = async (req, res) => {
       total_households,
       pending_households,
       total_officials,
+      total_residents,
       total_collected: Number(total_collected),
       collected_this_year: Number(collected_this_year),
       active_subscriptions: active_subs,
+      pending_subscriptions: pending_subs,
     });
   } catch (err) {
     console.error('getPlatformStats error:', err.message);
@@ -213,26 +213,21 @@ exports.listEstates = async (req, res) => {
   try {
     let sql = `
       SELECT
-        e.estate_id, e.estate_name, e.estate_urn, e.urn_prefix, e.estate_location,
+        e.estate_id, e.estate_name, e.estate_urn, e.estate_location,
         e.latitude, e.longitude, e.estate_image, e.logo_url,
-        e.welfare_mandatory, e.status, e.created_at,
+        e.created_at,
         (SELECT COUNT(*) FROM households h
          WHERE h.estate_id = e.estate_id AND h.status = 'Approved') AS household_count,
         (SELECT COUNT(*) FROM officials o
          WHERE o.estate_id = e.estate_id) AS official_count,
         (SELECT COALESCE(SUM(p.amount_paid), 0) FROM payments p
-         WHERE p.estate_id = e.estate_id AND p.payment_status = 'Completed') AS total_collected
+         WHERE p.estate_id = e.estate_id AND p.payment_status = 'Completed') AS total_collected,
+        (SELECT s.is_active FROM estate_subscriptions s
+         WHERE s.estate_id = e.estate_id LIMIT 1) AS sub_active
       FROM estates e
       WHERE 1=1
     `;
     const params = [];
-
-    if (status) {
-      sql += ` AND e.status = ?`;
-      params.push(status);
-    } else {
-      sql += ` AND e.status != 'Archived'`;
-    }
 
     if (search) {
       sql += ` AND (e.estate_name LIKE ? OR e.estate_urn LIKE ? OR e.estate_location LIKE ?)`;
@@ -243,7 +238,14 @@ exports.listEstates = async (req, res) => {
     sql += ` ORDER BY e.created_at DESC`;
 
     const [rows] = await db.promise().query(sql, params);
-    return res.json(rows);
+
+    // Normalize status for the frontend (there's no status column, so derive it)
+    const normalized = rows.map((r) => ({
+      ...r,
+      status: 'Active', // All estates in this table are considered active unless archived
+    }));
+
+    return res.json(normalized);
   } catch (err) {
     console.error('listEstates error:', err.message);
     return res.status(500).json({ error: 'Failed to list estates' });
@@ -294,6 +296,13 @@ exports.getEstate = async (req, res) => {
          (SELECT COALESCE(SUM(amount_paid), 0) FROM payments WHERE estate_id = ? AND payment_status = 'Completed') AS total_collected`,
       [id, id, id]
     );
+    const [[subscription]] = await db.promise().query(
+      `SELECT s.*, p.plan_name, p.monthly_rate
+       FROM estate_subscriptions s
+       LEFT JOIN subscription_plans p ON p.plan_id = s.plan_id
+       WHERE s.estate_id = ? LIMIT 1`,
+      [id]
+    );
 
     return res.json({
       estate,
@@ -304,6 +313,7 @@ exports.getEstate = async (req, res) => {
       courts,
       streets,
       stats,
+      subscription: subscription || null,
     });
   } catch (err) {
     console.error('getEstate error:', err.message);
@@ -321,7 +331,6 @@ exports.createEstate = async (req, res) => {
     latitude,
     longitude,
     urn_prefix,
-    welfare_mandatory = 0,
     estate_image,
     logo_url,
     address_config = {},
@@ -340,19 +349,17 @@ exports.createEstate = async (req, res) => {
 
     const [result] = await connection.query(
       `INSERT INTO estates
-         (estate_name, estate_urn, urn_prefix, estate_location,
-          latitude, longitude, estate_image, logo_url, welfare_mandatory, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')`,
+         (estate_name, estate_urn, estate_location,
+          latitude, longitude, estate_image, logo_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         estate_name,
         estate_urn,
-        prefix,
         estate_location || null,
         latitude != null ? Number(latitude) : null,
         longitude != null ? Number(longitude) : null,
         estate_image || null,
         logo_url || null,
-        welfare_mandatory ? 1 : 0,
       ]
     );
 
@@ -360,14 +367,13 @@ exports.createEstate = async (req, res) => {
 
     await connection.query(
       `INSERT INTO estate_address_config
-         (estate_id, show_street, show_section, show_court, show_house_number)
-       VALUES (?, ?, ?, ?, ?)`,
+         (estate_id, show_street, show_section, show_court)
+       VALUES (?, ?, ?, ?)`,
       [
         estate_id,
         address_config.show_street ?? 1,
         address_config.show_section ?? 1,
         address_config.show_court ?? 1,
-        address_config.show_house_number ?? 1,
       ]
     );
 
@@ -405,9 +411,6 @@ exports.updateEstate = async (req, res) => {
     'longitude',
     'estate_image',
     'logo_url',
-    'urn_prefix',
-    'welfare_mandatory',
-    'status',
   ];
 
   const updates = {};
@@ -431,7 +434,6 @@ exports.updateEstate = async (req, res) => {
 
     await redisClient.del('estates');
     await redisClient.del(`estate:${id}`);
-
     await logAdminAction(req.admin?.email, 'update_estate', 'estate', id, updates);
 
     return res.json({ message: 'Estate updated' });
@@ -442,31 +444,24 @@ exports.updateEstate = async (req, res) => {
 };
 
 // ============================================================
-// POST /api/admin/estates/:id/status
+// DELETE /api/admin/estates/:id
+// Hard delete is dangerous — this archives instead
 // ============================================================
-exports.setEstateStatus = async (req, res) => {
+exports.archiveEstate = async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
-
-  if (!['Active', 'Inactive', 'Archived'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid status' });
-  }
-
   try {
     const [result] = await db.promise().query(
-      `UPDATE estates SET status = ? WHERE estate_id = ?`,
-      [status, id]
+      `DELETE FROM estates WHERE estate_id = ?`,
+      [id]
     );
     if (!result.affectedRows) return res.status(404).json({ error: 'Estate not found' });
-
     await redisClient.del('estates');
     await redisClient.del(`estate:${id}`);
-    await logAdminAction(req.admin?.email, 'set_estate_status', 'estate', id, { status });
-
-    return res.json({ message: `Estate status set to ${status}` });
+    await logAdminAction(req.admin?.email, 'delete_estate', 'estate', id, null);
+    return res.json({ message: 'Estate removed' });
   } catch (err) {
-    console.error('setEstateStatus error:', err.message);
-    return res.status(500).json({ error: 'Failed to update status' });
+    console.error('archiveEstate error:', err.message);
+    return res.status(500).json({ error: 'Failed to remove estate' });
   }
 };
 
@@ -479,26 +474,23 @@ exports.setAddressConfig = async (req, res) => {
     show_street = 1,
     show_section = 1,
     show_court = 1,
-    show_house_number = 1,
   } = req.body;
 
   try {
     await db.promise().query(
       `INSERT INTO estate_address_config
-         (estate_id, show_street, show_section, show_court, show_house_number)
-       VALUES (?, ?, ?, ?, ?)
+         (estate_id, show_street, show_section, show_court)
+       VALUES (?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          show_street = VALUES(show_street),
          show_section = VALUES(show_section),
          show_court = VALUES(show_court),
-         show_house_number = VALUES(show_house_number),
          updated_at = CURRENT_TIMESTAMP`,
       [
         id,
         show_street ? 1 : 0,
         show_section ? 1 : 0,
         show_court ? 1 : 0,
-        show_house_number ? 1 : 0,
       ]
     );
     await redisClient.del(`address-config:${id}`);
@@ -529,9 +521,7 @@ exports.addCharge = async (req, res) => {
     );
     await redisClient.del(`service_charges/:${id}`);
     await logAdminAction(req.admin?.email, 'add_charge', 'estate', id, {
-      charge_type,
-      frequency,
-      amount,
+      charge_type, frequency, amount,
     });
     return res.status(201).json({ message: 'Charge added', charges_id: result.insertId });
   } catch (err) {
@@ -623,11 +613,53 @@ exports.addStreet = async (req, res) => {
 };
 
 // ============================================================
+// DELETE /api/admin/sections/:id   (also courts, streets)
+// ============================================================
+exports.deleteSection = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `DELETE FROM estate_sections WHERE id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Not found' });
+    return res.json({ message: 'Deleted' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete' });
+  }
+};
+
+exports.deleteCourt = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `DELETE FROM estate_courts WHERE id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Not found' });
+    return res.json({ message: 'Deleted' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete' });
+  }
+};
+
+exports.deleteStreet = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `DELETE FROM estate_streets WHERE id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Not found' });
+    return res.json({ message: 'Deleted' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete' });
+  }
+};
+
+// ============================================================
 // POST /api/admin/estates/:id/first-official
 // ============================================================
 exports.createFirstOfficial = async (req, res) => {
   const { id } = req.params;
-  const { full_name, contact_number, uid, email } = req.body;
+  const { full_name, contact_number, uid, role } = req.body;
 
   if (!full_name || !contact_number) {
     return res.status(400).json({ error: 'full_name and contact_number required' });
@@ -642,13 +674,12 @@ exports.createFirstOfficial = async (req, res) => {
 
     const [result] = await db.promise().query(
       `INSERT INTO officials (estate_id, full_name, role, contact_number, estate_urn, uid)
-       VALUES (?, ?, 'Chairman', ?, ?, ?)`,
-      [id, full_name, contact_number, estate.estate_urn, uid || null]
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, full_name, role || 'Chairman', contact_number, estate.estate_urn, uid || null]
     );
 
     await logAdminAction(req.admin?.email, 'create_first_official', 'estate', id, {
-      full_name,
-      contact_number,
+      full_name, contact_number,
     });
 
     return res.status(201).json({
@@ -658,6 +689,378 @@ exports.createFirstOfficial = async (req, res) => {
   } catch (err) {
     console.error('createFirstOfficial error:', err.message);
     return res.status(500).json({ error: 'Failed to create official' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/officials
+// Every official across the platform
+// ============================================================
+exports.listOfficials = async (req, res) => {
+  const { search, role, estate_id } = req.query;
+
+  try {
+    let sql = `
+      SELECT
+        o.official_id,
+        o.estate_id,
+        o.full_name,
+        o.role,
+        o.contact_number,
+        o.uid,
+        o.created_at,
+        e.estate_name,
+        e.estate_urn
+      FROM officials o
+      LEFT JOIN estates e ON e.estate_id = o.estate_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (role) {
+      sql += ` AND o.role = ?`;
+      params.push(role);
+    }
+    if (estate_id) {
+      sql += ` AND o.estate_id = ?`;
+      params.push(estate_id);
+    }
+    if (search) {
+      sql += ` AND (o.full_name LIKE ? OR o.contact_number LIKE ? OR e.estate_name LIKE ?)`;
+      const pat = `%${search}%`;
+      params.push(pat, pat, pat);
+    }
+
+    sql += ` ORDER BY o.created_at DESC`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listOfficials error:', err.message);
+    return res.status(500).json({ error: 'Failed to list officials' });
+  }
+};
+
+// ============================================================
+// DELETE /api/admin/officials/:id
+// ============================================================
+exports.deleteOfficial = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [result] = await db.promise().query(
+      `DELETE FROM officials WHERE official_id = ?`,
+      [id]
+    );
+    if (!result.affectedRows) return res.status(404).json({ error: 'Official not found' });
+    await logAdminAction(req.admin?.email, 'delete_official', 'official', Number(id), null);
+    return res.json({ message: 'Official removed' });
+  } catch (err) {
+    console.error('deleteOfficial error:', err.message);
+    return res.status(500).json({ error: 'Failed to remove official' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/subscriptions
+// Every non-archived estate + its subscription + plan
+// ============================================================
+exports.listSubscriptions = async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(`
+      SELECT
+        e.estate_id,
+        e.estate_name,
+        e.estate_urn,
+        e.estate_location,
+
+        s.subscription_id,
+        s.plan_id,
+        s.start_date,
+        s.end_date,
+        s.amount_paid,
+        s.payment_status,
+        s.payment_method,
+        s.transaction_id,
+        s.is_active,
+        s.created_at AS subscription_created_at,
+
+        p.plan_name,
+        p.monthly_rate,
+        p.min_households,
+        p.max_households
+      FROM estates e
+      LEFT JOIN estate_subscriptions s
+        ON s.estate_id = e.estate_id
+      LEFT JOIN subscription_plans p
+        ON p.plan_id = s.plan_id
+      ORDER BY
+        (s.subscription_id IS NULL) ASC,
+        s.end_date ASC,
+        e.estate_name ASC
+    `);
+
+    const now = Date.now();
+
+    const normalized = rows.map((r) => {
+      let status = 'NotSubscribed';
+      if (r.subscription_id) {
+        if (!r.is_active) status = 'Cancelled';
+        else if (r.end_date && new Date(r.end_date).getTime() < now) status = 'Expired';
+        else if (r.payment_status === 'Pending') status = 'Pending';
+        else if (r.payment_status === 'Failed') status = 'Failed';
+        else status = 'Active';
+      }
+
+      return {
+        id: r.subscription_id || `estate-${r.estate_id}`,
+        estate_id: r.estate_id,
+        estate_name: r.estate_name,
+        estate_urn: r.estate_urn,
+        estate_location: r.estate_location,
+
+        plan_id: r.plan_id || null,
+        plan_name: r.plan_name || null,
+        plan_code: r.plan_id ? `Band ${r.plan_id}` : null,
+        monthly_rate: r.monthly_rate != null ? Number(r.monthly_rate) : null,
+        min_households: r.min_households,
+        max_households: r.max_households,
+
+        amount: r.amount_paid != null ? Number(r.amount_paid) : 0,
+        billing_cycle: r.start_date && r.end_date ? 'Custom' : 'Monthly',
+        status,
+        payment_status: r.payment_status || null,
+        payment_method: r.payment_method || null,
+        transaction_id: r.transaction_id || null,
+
+        current_period_start: r.start_date,
+        current_period_end: r.end_date,
+        reference: r.subscription_id
+          ? `SUB-${String(r.subscription_id).padStart(4, '0')}`
+          : null,
+      };
+    });
+
+    return res.json(normalized);
+  } catch (err) {
+    console.error('listSubscriptions error:', err.message);
+    return res.status(500).json({ error: 'Failed to list subscriptions' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/subscriptions
+// Create or update a subscription for an estate
+// ============================================================
+exports.upsertSubscription = async (req, res) => {
+  const {
+    estate_id,
+    plan_id,
+    start_date,
+    end_date,
+    amount_paid,
+    payment_status = 'Pending',
+    payment_method,
+    transaction_id,
+    is_active = 1,
+  } = req.body;
+
+  if (!estate_id || !plan_id || !start_date || amount_paid == null) {
+    return res.status(400).json({
+      error: 'estate_id, plan_id, start_date, amount_paid are required',
+    });
+  }
+
+  try {
+    const [[estate]] = await db.promise().query(
+      `SELECT estate_id FROM estates WHERE estate_id = ?`, [estate_id]
+    );
+    if (!estate) return res.status(404).json({ error: 'Estate not found' });
+
+    await db.promise().query(
+      `INSERT INTO estate_subscriptions
+         (estate_id, plan_id, start_date, end_date, amount_paid,
+          payment_status, payment_method, transaction_id, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         plan_id = VALUES(plan_id),
+         start_date = VALUES(start_date),
+         end_date = VALUES(end_date),
+         amount_paid = VALUES(amount_paid),
+         payment_status = VALUES(payment_status),
+         payment_method = VALUES(payment_method),
+         transaction_id = VALUES(transaction_id),
+         is_active = VALUES(is_active),
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        estate_id,
+        plan_id,
+        start_date,
+        end_date || null,
+        Number(amount_paid),
+        payment_status,
+        payment_method || 'Mpesa',
+        transaction_id || `ADMIN-${Date.now()}`,
+        is_active ? 1 : 0,
+      ]
+    );
+
+    await logAdminAction(req.admin?.email, 'upsert_subscription', 'estate', estate_id, {
+      plan_id, amount_paid, payment_status,
+    });
+
+    return res.status(201).json({ message: 'Subscription saved' });
+  } catch (err) {
+    console.error('upsertSubscription error:', err.message);
+    return res.status(500).json({ error: 'Failed to save subscription' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/subscriptions/:id/status
+// Toggle is_active or payment_status
+// ============================================================
+exports.setSubscriptionStatus = async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!['Active', 'Pending', 'Failed', 'Cancelled', 'Expired'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+
+  try {
+    if (status === 'Active') {
+      await db.promise().query(
+        `UPDATE estate_subscriptions
+         SET is_active = 1, payment_status = 'Paid'
+         WHERE subscription_id = ?`,
+        [id]
+      );
+    } else if (status === 'Cancelled') {
+      await db.promise().query(
+        `UPDATE estate_subscriptions SET is_active = 0 WHERE subscription_id = ?`,
+        [id]
+      );
+    } else if (status === 'Pending') {
+      await db.promise().query(
+        `UPDATE estate_subscriptions
+         SET payment_status = 'Pending', is_active = 1
+         WHERE subscription_id = ?`,
+        [id]
+      );
+    } else if (status === 'Failed') {
+      await db.promise().query(
+        `UPDATE estate_subscriptions
+         SET payment_status = 'Failed', is_active = 0
+         WHERE subscription_id = ?`,
+        [id]
+      );
+    } else if (status === 'Expired') {
+      await db.promise().query(
+        `UPDATE estate_subscriptions
+         SET is_active = 0
+         WHERE subscription_id = ?`,
+        [id]
+      );
+    }
+
+    await logAdminAction(req.admin?.email, 'set_subscription_status', 'subscription', Number(id), { status });
+    return res.json({ message: `Subscription set to ${status}` });
+  } catch (err) {
+    console.error('setSubscriptionStatus error:', err.message);
+    return res.status(500).json({ error: 'Failed to update subscription' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/residents
+// Every household across all estates (super-admin view)
+// ============================================================
+exports.listResidents = async (req, res) => {
+  const { search, estate_id, status } = req.query;
+
+  try {
+    let sql = `
+      SELECT
+        h.household_id,
+        h.estate_id,
+        h.uid,
+        h.primary_owner,
+        h.spouse_name,
+        h.contact_number,
+        h.house_number,
+        h.section,
+        h.court,
+        h.street,
+        h.residence_status,
+        h.is_official,
+        h.official_role,
+        h.active,
+        h.status,
+        h.take_on_balance,
+        h.created_at,
+        e.estate_name,
+        e.estate_urn
+      FROM households h
+      LEFT JOIN estates e ON e.estate_id = h.estate_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (estate_id) {
+      sql += ` AND h.estate_id = ?`;
+      params.push(estate_id);
+    }
+    if (status) {
+      sql += ` AND h.status = ?`;
+      params.push(status);
+    }
+    if (search) {
+      sql += ` AND (h.primary_owner LIKE ? OR h.contact_number LIKE ?
+                    OR h.house_number LIKE ? OR e.estate_name LIKE ?)`;
+      const pat = `%${search}%`;
+      params.push(pat, pat, pat, pat);
+    }
+
+    sql += ` ORDER BY h.created_at DESC`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listResidents error:', err.message);
+    return res.status(500).json({ error: 'Failed to list residents' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/activity
+// Recent cross-platform activity for the dashboard
+// ============================================================
+exports.getRecentActivity = async (req, res) => {
+  try {
+    const [recentEstates] = await db.promise().query(`
+      SELECT estate_id AS id, estate_name AS label, 'estate' AS type, created_at
+      FROM estates ORDER BY created_at DESC LIMIT 5
+    `);
+    const [recentHouseholds] = await db.promise().query(`
+      SELECT h.household_id AS id, h.primary_owner AS label, 'household' AS type, h.created_at,
+             e.estate_name AS estate_name
+      FROM households h
+      LEFT JOIN estates e ON e.estate_id = h.estate_id
+      ORDER BY h.created_at DESC LIMIT 5
+    `);
+    const [recentPayments] = await db.promise().query(`
+      SELECT p.payment_id AS id, p.amount_paid AS amount, p.payment_method,
+             p.payment_date AS created_at, e.estate_name
+      FROM payments p
+      LEFT JOIN estates e ON e.estate_id = p.estate_id
+      WHERE p.payment_status = 'Completed'
+      ORDER BY p.payment_date DESC LIMIT 5
+    `);
+
+    return res.json({ recentEstates, recentHouseholds, recentPayments });
+  } catch (err) {
+    console.error('getRecentActivity error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch activity' });
   }
 };
 
@@ -677,12 +1080,8 @@ exports.getAuditLogs = async (req, res) => {
 };
 
 // ============================================================
-// ADMINS MANAGEMENT (super admin only)
+// ADMINS MANAGEMENT
 // ============================================================
-
-/**
- * GET /api/admin/admins
- */
 exports.listAdmins = async (req, res) => {
   try {
     const [rows] = await db.promise().query(
@@ -697,10 +1096,6 @@ exports.listAdmins = async (req, res) => {
   }
 };
 
-/**
- * POST /api/admin/admins
- * Body: { email, full_name, role, firebase_uid? }
- */
 exports.addAdmin = async (req, res) => {
   const { email, full_name = null, role = 'support', firebase_uid = null } = req.body;
 
@@ -722,8 +1117,7 @@ exports.addAdmin = async (req, res) => {
     );
 
     await logAdminAction(req.admin?.email, 'add_admin', 'admin', result.insertId, {
-      email: normalized,
-      role,
+      email: normalized, role,
     });
 
     return res.status(201).json({
@@ -741,10 +1135,6 @@ exports.addAdmin = async (req, res) => {
   }
 };
 
-/**
- * PATCH /api/admin/admins/:id
- * Body: { role?, active?, full_name?, firebase_uid? }
- */
 exports.updateAdmin = async (req, res) => {
   const { id } = req.params;
   const { role, active, full_name, firebase_uid } = req.body;
@@ -775,7 +1165,6 @@ exports.updateAdmin = async (req, res) => {
     if (!result.affectedRows) return res.status(404).json({ error: 'Admin not found' });
 
     await logAdminAction(req.admin?.email, 'update_admin', 'admin', Number(id), updates);
-
     return res.json({ message: 'Admin updated' });
   } catch (err) {
     console.error('updateAdmin error:', err.message);
@@ -783,10 +1172,6 @@ exports.updateAdmin = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/admins/:id
- * Soft delete (active = 0). Cannot remove yourself.
- */
 exports.removeAdmin = async (req, res) => {
   const { id } = req.params;
 

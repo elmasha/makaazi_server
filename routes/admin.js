@@ -16,18 +16,27 @@ router.get('/public-stats', ctrl.getPublicStats);
 // ============================================================
 router.use(adminAuth);
 
+// ------------------------------------------------------------
 // Identity
+// ------------------------------------------------------------
 router.get('/me', ctrl.getMe);
 
-// Platform stats
+// ------------------------------------------------------------
+// Platform stats + activity
+// ------------------------------------------------------------
 router.get('/stats', ctrl.getPlatformStats);
+router.get('/activity', ctrl.getRecentActivity);
 
+// ------------------------------------------------------------
 // Estates
+// ------------------------------------------------------------
 router.get('/estates', ctrl.listEstates);
 router.post('/estates', ctrl.createEstate);
 router.get('/estates/:id', ctrl.getEstate);
 router.patch('/estates/:id', ctrl.updateEstate);
-router.post('/estates/:id/status', ctrl.setEstateStatus);
+router.delete('/estates/:id', ctrl.archiveEstate);
+
+// Estate sub-resources
 router.post('/estates/:id/address-config', ctrl.setAddressConfig);
 router.post('/estates/:id/charges', ctrl.addCharge);
 router.post('/estates/:id/sections', ctrl.addSection);
@@ -35,10 +44,35 @@ router.post('/estates/:id/courts', ctrl.addCourt);
 router.post('/estates/:id/streets', ctrl.addStreet);
 router.post('/estates/:id/first-official', ctrl.createFirstOfficial);
 
+// Dropdown management (delete individual sections/courts/streets)
+router.delete('/sections/:id', ctrl.deleteSection);
+router.delete('/courts/:id', ctrl.deleteCourt);
+router.delete('/streets/:id', ctrl.deleteStreet);
+
 // Charges
 router.delete('/charges/:chargeId', ctrl.deleteCharge);
 
-// Audit — any admin can read
+// ------------------------------------------------------------
+// Officials (cross-estate)
+// ------------------------------------------------------------
+router.get('/officials', ctrl.listOfficials);
+router.delete('/officials/:id', ctrl.deleteOfficial);
+
+// ------------------------------------------------------------
+// Subscriptions
+// ------------------------------------------------------------
+router.get('/subscriptions', ctrl.listSubscriptions);
+router.post('/subscriptions', ctrl.upsertSubscription);
+router.post('/subscriptions/:id/status', ctrl.setSubscriptionStatus);
+
+// ------------------------------------------------------------
+// Residents (cross-estate household view)
+// ------------------------------------------------------------
+router.get('/residents', ctrl.listResidents);
+
+// ------------------------------------------------------------
+// Audit logs (any admin can read)
+// ------------------------------------------------------------
 router.get('/audit-logs', ctrl.getAuditLogs);
 
 // ============================================================
