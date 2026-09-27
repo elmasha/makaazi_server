@@ -1340,3 +1340,89 @@ exports.getSmsStats = async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch SMS stats' });
   }
 };
+
+
+// ============================================================
+// GET /api/admin/admins/eligible-users
+// Distinct users (households + officials) that are not yet admins
+// ============================================================
+exports.listEligibleAdminUsers = async (req, res) => {
+  const { search } = req.query;
+
+  try {
+    let sql = `
+      SELECT * FROM (
+        SELECT
+          h.uid                              AS uid,
+          NULL                               AS email,
+          h.primary_owner                    AS full_name,
+          h.contact_number                   AS phone,
+          'household'                        AS source,
+          h.household_id                     AS source_id,
+          e.estate_name                      AS estate_name
+        FROM households h
+        LEFT JOIN estates e ON e.estate_id = h.estate_id
+        WHERE h.status = 'Approved'
+
+        UNION
+
+        SELECT
+          o.uid                              AS uid,
+          NULL                               AS email,
+          o.full_name                        AS full_name,
+          o.contact_number                   AS phone,
+          'official'                         AS source,
+          o.official_id                      AS source_id,
+          e.estate_name                      AS estate_name
+        FROM officials o
+        LEFT JOIN estates e ON e.estate_id = o.estate_id
+      ) u
+      WHERE NOT EXISTS (
+        SELECT 1 FROM intec_admins a
+        WHERE a.firebase_uid = u.uid
+      )
+    `;
+    const params = [];
+
+    if (search) {
+      sql += ` AND (u.full_name LIKE ? OR u.phone LIKE ? OR u.estate_name LIKE ?)`;
+      const pat = `%${search}%`;
+      params.push(pat, pat, pat);
+    }
+
+    sql += ` ORDER BY u.full_name ASC LIMIT 200`;
+
+    const [rows] = await db.promise().query(sql, params);
+
+    // Enrich with Firebase email if we can
+    // (auth.getUsers requires UIDs in batches of 100)
+    const uids = rows.map((r) => r.uid).filter(Boolean);
+    const emailByUid = {};
+    if (uids.length) {
+      try {
+        const batch = uids.slice(0, 100);
+        const result = await admin.auth().getUsers(batch.map((uid) => ({ uid })));
+        result.users.forEach((u) => {
+          emailByUid[u.uid] = u.email || null;
+        });
+      } catch (e) {
+        console.warn('getUsers failed:', e.message);
+      }
+    }
+
+    const enriched = rows.map((r) => ({
+      uid: r.uid,
+      email: emailByUid[r.uid] || r.email || null,
+      full_name: r.full_name,
+      phone: r.phone,
+      source: r.source,
+      source_id: r.source_id,
+      estate_name: r.estate_name,
+    }));
+
+    return res.json(enriched);
+  } catch (err) {
+    console.error('listEligibleAdminUsers error:', err.message);
+    return res.status(500).json({ error: 'Failed to load eligible users' });
+  }
+};

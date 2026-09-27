@@ -93,5 +93,5 @@ router.get('/admins', requireRole('super'), ctrl.listAdmins);
 router.post('/admins', requireRole('super'), ctrl.addAdmin);
 router.patch('/admins/:id', requireRole('super'), ctrl.updateAdmin);
 router.delete('/admins/:id', requireRole('super'), ctrl.removeAdmin);
-
+router.get('/admins/eligible-users', requireRole('super'), ctrl.listEligibleAdminUsers);
 module.exports = router;
