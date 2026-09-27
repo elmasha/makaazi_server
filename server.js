@@ -49,6 +49,7 @@ app.use('/api/audit-logs', require('./routes/auditLogs'));
 app.use('/api/services', require('./routes/serviceCharges'));
 app.use("/api/fcm",  require("./routes/fcm"));
 app.use("/api/household-payments", require('./routes/householdPayments'));
+app.use('/api/admin', require('./routes/admin'));
 // Start the Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
