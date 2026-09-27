@@ -44,7 +44,7 @@ router.post('/estates/:id/courts', ctrl.addCourt);
 router.post('/estates/:id/streets', ctrl.addStreet);
 router.post('/estates/:id/first-official', ctrl.createFirstOfficial);
 
-// Dropdown management (delete individual sections/courts/streets)
+// Dropdown management
 router.delete('/sections/:id', ctrl.deleteSection);
 router.delete('/courts/:id', ctrl.deleteCourt);
 router.delete('/streets/:id', ctrl.deleteStreet);
@@ -64,6 +64,14 @@ router.delete('/officials/:id', ctrl.deleteOfficial);
 router.get('/subscriptions', ctrl.listSubscriptions);
 router.post('/subscriptions', ctrl.upsertSubscription);
 router.post('/subscriptions/:id/status', ctrl.setSubscriptionStatus);
+
+// ------------------------------------------------------------
+// Subscription plans (CRUD — super admin for mutations)
+// ------------------------------------------------------------
+router.get('/subscription-plans', ctrl.listSubscriptionPlans);
+router.post('/subscription-plans', requireRole('super'), ctrl.createSubscriptionPlan);
+router.patch('/subscription-plans/:id', requireRole('super'), ctrl.updateSubscriptionPlan);
+router.delete('/subscription-plans/:id', requireRole('super'), ctrl.deleteSubscriptionPlan);
 
 // ------------------------------------------------------------
 // Residents (cross-estate household view)
@@ -94,4 +102,5 @@ router.post('/admins', requireRole('super'), ctrl.addAdmin);
 router.patch('/admins/:id', requireRole('super'), ctrl.updateAdmin);
 router.delete('/admins/:id', requireRole('super'), ctrl.removeAdmin);
 router.get('/admins/eligible-users', requireRole('super'), ctrl.listEligibleAdminUsers);
+
 module.exports = router;

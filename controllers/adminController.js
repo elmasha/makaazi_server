@@ -1426,3 +1426,181 @@ exports.listEligibleAdminUsers = async (req, res) => {
     return res.status(500).json({ error: 'Failed to load eligible users' });
   }
 };
+
+
+// ============================================================
+// GET /api/admin/subscription-plans
+// Returns all subscription plans ordered by tier
+// ============================================================
+exports.listSubscriptionPlans = async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT plan_id, plan_name, min_households, max_households,
+              monthly_rate, created_at, updated_at
+       FROM subscription_plans
+       ORDER BY min_households ASC`
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('listSubscriptionPlans error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch plans' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/subscription-plans
+// Body: { plan_name, min_households, max_households?, monthly_rate }
+// ============================================================
+exports.createSubscriptionPlan = async (req, res) => {
+  const { plan_name, min_households, max_households, monthly_rate } = req.body;
+
+  if (!plan_name || min_households == null || monthly_rate == null) {
+    return res.status(400).json({
+      error: 'plan_name, min_households and monthly_rate are required',
+    });
+  }
+
+  const minH = Number(min_households);
+  const maxH =
+    max_households === '' || max_households == null
+      ? null
+      : Number(max_households);
+  const rate = Number(monthly_rate);
+
+  if (Number.isNaN(minH) || minH < 1) {
+    return res.status(400).json({ error: 'min_households must be >= 1' });
+  }
+  if (maxH !== null && (Number.isNaN(maxH) || maxH < minH)) {
+    return res.status(400).json({ error: 'max_households must be >= min_households' });
+  }
+  if (Number.isNaN(rate) || rate < 0) {
+    return res.status(400).json({ error: 'monthly_rate must be >= 0' });
+  }
+
+  try {
+    // Check for overlapping tier
+    const [[overlap]] = await db.promise().query(
+      `SELECT plan_id, plan_name
+       FROM subscription_plans
+       WHERE (? <= COALESCE(max_households, 999999999))
+         AND (COALESCE(?, 999999999) >= min_households)
+       LIMIT 1`,
+      [minH, maxH]
+    );
+
+    if (overlap) {
+      return res.status(409).json({
+        error: `Range overlaps with existing plan "${overlap.plan_name}"`,
+      });
+    }
+
+    const [result] = await db.promise().query(
+      `INSERT INTO subscription_plans
+         (plan_name, min_households, max_households, monthly_rate)
+       VALUES (?, ?, ?, ?)`,
+      [plan_name, minH, maxH, rate]
+    );
+
+    await logAdminAction(req.admin?.email, 'create_plan', 'plan', result.insertId, {
+      plan_name, min_households: minH, max_households: maxH, monthly_rate: rate,
+    });
+
+    return res.status(201).json({
+      message: 'Plan created',
+      plan_id: result.insertId,
+    });
+  } catch (err) {
+    console.error('createSubscriptionPlan error:', err.message);
+    return res.status(500).json({ error: 'Failed to create plan' });
+  }
+};
+
+// ============================================================
+// PATCH /api/admin/subscription-plans/:id
+// ============================================================
+exports.updateSubscriptionPlan = async (req, res) => {
+  const { id } = req.params;
+  const { plan_name, min_households, max_households, monthly_rate } = req.body;
+
+  const updates = {};
+  if (plan_name !== undefined) updates.plan_name = plan_name;
+  if (min_households !== undefined) updates.min_households = Number(min_households);
+  if (monthly_rate !== undefined) updates.monthly_rate = Number(monthly_rate);
+  if (max_households !== undefined) {
+    updates.max_households =
+      max_households === '' || max_households == null
+        ? null
+        : Number(max_households);
+  }
+
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  if (updates.min_households != null && updates.min_households < 1) {
+    return res.status(400).json({ error: 'min_households must be >= 1' });
+  }
+  if (
+    updates.max_households != null &&
+    updates.min_households != null &&
+    updates.max_households < updates.min_households
+  ) {
+    return res.status(400).json({ error: 'max_households must be >= min_households' });
+  }
+
+  const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+  const values = [...Object.values(updates), id];
+
+  try {
+    const [result] = await db.promise().query(
+      `UPDATE subscription_plans SET ${setters} WHERE plan_id = ?`,
+      values
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    await logAdminAction(req.admin?.email, 'update_plan', 'plan', Number(id), updates);
+
+    return res.json({ message: 'Plan updated' });
+  } catch (err) {
+    console.error('updateSubscriptionPlan error:', err.message);
+    return res.status(500).json({ error: 'Failed to update plan' });
+  }
+};
+
+// ============================================================
+// DELETE /api/admin/subscription-plans/:id
+// Blocked if any estate_subscriptions reference this plan
+// ============================================================
+exports.deleteSubscriptionPlan = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Block if in use
+    const [[{ count }]] = await db.promise().query(
+      `SELECT COUNT(*) AS count FROM estate_subscriptions WHERE plan_id = ?`,
+      [id]
+    );
+    if (count > 0) {
+      return res.status(400).json({
+        error: `Cannot delete — ${count} estate subscription(s) use this plan`,
+      });
+    }
+
+    const [result] = await db.promise().query(
+      `DELETE FROM subscription_plans WHERE plan_id = ?`,
+      [id]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    await logAdminAction(req.admin?.email, 'delete_plan', 'plan', Number(id), null);
+
+    return res.json({ message: 'Plan deleted' });
+  } catch (err) {
+    console.error('deleteSubscriptionPlan error:', err.message);
+    return res.status(500).json({ error: 'Failed to delete plan' });
+  }
+};
