@@ -75,6 +75,17 @@ router.get('/residents', ctrl.listResidents);
 // ------------------------------------------------------------
 router.get('/audit-logs', ctrl.getAuditLogs);
 
+// ------------------------------------------------------------
+// SMS logs + balance (any admin can read)
+// NOTE: /sms-balance and /sms-stats MUST be registered
+// BEFORE /sms-logs/:id, otherwise Express matches them
+// against the :id param.
+// ------------------------------------------------------------
+router.get('/sms-balance', ctrl.getSmsBalance);
+router.get('/sms-stats',   ctrl.getSmsStats);
+router.get('/sms-logs',    ctrl.listSmsLogs);
+router.get('/sms-logs/:id', ctrl.getSmsLog);
+
 // ============================================================
 // SUPER-ADMIN ONLY
 // ============================================================

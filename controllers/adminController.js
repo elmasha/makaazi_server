@@ -2,6 +2,7 @@
 const db = require('../config/db');
 const redisClient = require('../config/redis');
 const admin = require('../config/firebaseAdmin');
+const { getSmsBalance } = require('../services/advantaSms');
 
 // ============================================================
 // Helpers
@@ -239,10 +240,9 @@ exports.listEstates = async (req, res) => {
 
     const [rows] = await db.promise().query(sql, params);
 
-    // Normalize status for the frontend (there's no status column, so derive it)
     const normalized = rows.map((r) => ({
       ...r,
-      status: 'Active', // All estates in this table are considered active unless archived
+      status: 'Active',
     }));
 
     return res.json(normalized);
@@ -445,7 +445,6 @@ exports.updateEstate = async (req, res) => {
 
 // ============================================================
 // DELETE /api/admin/estates/:id
-// Hard delete is dangerous — this archives instead
 // ============================================================
 exports.archiveEstate = async (req, res) => {
   const { id } = req.params;
@@ -694,7 +693,6 @@ exports.createFirstOfficial = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/officials
-// Every official across the platform
 // ============================================================
 exports.listOfficials = async (req, res) => {
   const { search, role, estate_id } = req.query;
@@ -762,7 +760,6 @@ exports.deleteOfficial = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/subscriptions
-// Every non-archived estate + its subscription + plan
 // ============================================================
 exports.listSubscriptions = async (req, res) => {
   try {
@@ -849,7 +846,6 @@ exports.listSubscriptions = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/subscriptions
-// Create or update a subscription for an estate
 // ============================================================
 exports.upsertSubscription = async (req, res) => {
   const {
@@ -917,7 +913,6 @@ exports.upsertSubscription = async (req, res) => {
 
 // ============================================================
 // POST /api/admin/subscriptions/:id/status
-// Toggle is_active or payment_status
 // ============================================================
 exports.setSubscriptionStatus = async (req, res) => {
   const { id } = req.params;
@@ -973,7 +968,6 @@ exports.setSubscriptionStatus = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/residents
-// Every household across all estates (super-admin view)
 // ============================================================
 exports.listResidents = async (req, res) => {
   const { search, estate_id, status } = req.query;
@@ -1033,7 +1027,6 @@ exports.listResidents = async (req, res) => {
 
 // ============================================================
 // GET /api/admin/activity
-// Recent cross-platform activity for the dashboard
 // ============================================================
 exports.getRecentActivity = async (req, res) => {
   try {
@@ -1199,5 +1192,151 @@ exports.removeAdmin = async (req, res) => {
   } catch (err) {
     console.error('removeAdmin error:', err.message);
     return res.status(500).json({ error: 'Failed to remove admin' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/sms-logs
+// ============================================================
+exports.listSmsLogs = async (req, res) => {
+  const { kind, estate_id, ok, search } = req.query;
+
+  try {
+    let sql = `
+      SELECT
+        s.id            AS sms_id,
+        s.phone         AS phone_number,
+        s.message,
+        s.kind,
+        s.user_uid,
+        s.estate_id,
+        s.ok,
+        s.provider_ref,
+        s.error,
+        s.created_at,
+        e.estate_name
+      FROM sms_logs s
+      LEFT JOIN estates e ON e.estate_id = s.estate_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (kind) {
+      sql += ` AND s.kind = ?`;
+      params.push(kind);
+    }
+    if (estate_id) {
+      sql += ` AND s.estate_id = ?`;
+      params.push(estate_id);
+    }
+    if (ok === '1' || ok === '0') {
+      sql += ` AND s.ok = ?`;
+      params.push(Number(ok));
+    }
+    if (search) {
+      sql += ` AND (s.phone LIKE ? OR s.message LIKE ? OR e.estate_name LIKE ?)`;
+      const pat = `%${search}%`;
+      params.push(pat, pat, pat);
+    }
+
+    sql += ` ORDER BY s.created_at DESC LIMIT 500`;
+
+    const [rows] = await db.promise().query(sql, params);
+
+    const normalized = rows.map((r) => ({
+      sms_id: r.sms_id,
+      phone_number: r.phone_number,
+      message: r.message,
+      category: r.kind || 'generic',
+      kind: r.kind,
+      user_uid: r.user_uid,
+      estate_id: r.estate_id,
+      estate_name: r.estate_name,
+      provider_ref: r.provider_ref,
+      error: r.error,
+      status: r.ok ? 'Sent' : 'Failed',
+      created_at: r.created_at,
+    }));
+
+    return res.json(normalized);
+  } catch (err) {
+    console.error('listSmsLogs error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch SMS logs' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/sms-logs/:id
+// ============================================================
+exports.getSmsLog = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [[row]] = await db.promise().query(
+      `SELECT s.*, e.estate_name
+       FROM sms_logs s
+       LEFT JOIN estates e ON e.estate_id = s.estate_id
+       WHERE s.id = ? LIMIT 1`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'SMS log not found' });
+    return res.json({
+      ...row,
+      sms_id: row.id,
+      phone_number: row.phone,
+      category: row.kind,
+      status: row.ok ? 'Sent' : 'Failed',
+    });
+  } catch (err) {
+    console.error('getSmsLog error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch SMS log' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/sms-balance
+// ============================================================
+exports.getSmsBalance = async (req, res) => {
+  try {
+    const result = await getSmsBalance();
+    if (!result.ok) {
+      return res.status(200).json({
+        ok: false,
+        error: result.error || 'Could not fetch balance',
+      });
+    }
+    return res.json({
+      ok: true,
+      balance: result.balance,
+      currency: result.currency || 'KES',
+    });
+  } catch (err) {
+    console.error('getSmsBalance error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to fetch balance' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/sms-stats
+// ============================================================
+exports.getSmsStats = async (req, res) => {
+  try {
+    const [[totals]] = await db.promise().query(`
+      SELECT
+        COUNT(*)                                AS total,
+        SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS sent,
+        SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END) AS today
+      FROM sms_logs
+    `);
+
+    return res.json({
+      total: Number(totals.total || 0),
+      sent: Number(totals.sent || 0),
+      failed: Number(totals.failed || 0),
+      today: Number(totals.today || 0),
+    });
+  } catch (err) {
+    console.error('getSmsStats error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch SMS stats' });
   }
 };
