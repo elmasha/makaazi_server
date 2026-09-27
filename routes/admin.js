@@ -1,6 +1,5 @@
 // routes/admin.js
 const express = require('express');
-const db = require('../config/db');
 const router = express.Router();
 const adminAuth = require('../middleware/adminAuth');
 const { requireRole } = adminAuth;
