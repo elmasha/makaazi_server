@@ -105,4 +105,22 @@ router.patch('/admins/:id', requireRole('super'), ctrl.updateAdmin);
 router.delete('/admins/:id', requireRole('super'), ctrl.removeAdmin);
 router.get('/admins/eligible-users', requireRole('super'), ctrl.listEligibleAdminUsers);
 
+
+// ---------- vehicles ----------
+router.get   ('/vehicles',                 verifyAdmin, c.listAllVehicles);
+router.get   ('/vehicles/:id',             verifyAdmin, c.getVehicleById);
+router.post  ('/vehicles',                 verifyAdmin, c.adminCreateVehicle);
+router.patch ('/vehicles/:id',             verifyAdmin, c.adminUpdateVehicle);
+router.post  ('/vehicles/:id/approve',     verifyAdmin, c.adminApproveVehicle);
+router.post  ('/vehicles/:id/suspend',     verifyAdmin, c.adminSuspendVehicle);
+router.delete('/vehicles/:id',             verifyAdmin, c.adminDeleteVehicle);
+
+// ---------- visitor passes ----------
+router.get   ('/visitor-passes',           verifyAdmin, c.listAllVisitorPasses);
+router.post  ('/visitor-passes/:id/cancel',verifyAdmin, c.adminCancelVisitorPass);
+
+// ---------- access logs ----------
+router.get   ('/vehicle-access-logs',      verifyAdmin, c.listAllAccessLogs);
+router.get   ('/vehicle-stats',            verifyAdmin, c.getAdminVehicleStats);
+
 module.exports = router;

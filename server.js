@@ -50,6 +50,8 @@ app.use('/api/services', require('./routes/serviceCharges'));
 app.use("/api/fcm",  require("./routes/fcm"));
 app.use("/api/household-payments", require('./routes/householdPayments'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/vehicles',        require('./routes/vehicles'));
+app.use('/api/visitor-passes',  require('./routes/visitorPasses'));
 // Start the Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {

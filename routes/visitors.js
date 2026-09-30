@@ -1,13 +1,21 @@
-const express = require('express');
-const router = express.Router();
-const { createVisitor,getAllVisitors,getVisitorById,updateVisitor,deleteVisitor } = require('../controllers/visitorsController');
+// routes/visitorPasses.js
+const router = require('express').Router();
+const c = require('../controllers/visitorsController');
+const { requireRole } = require('../middleware/requireRole');
 
-// router.get('/', getAllVisitors);    // Get all visitors
-router.post('/createVisitor', createVisitor);
-router.get('/getAllVisitors', getAllVisitors);
-router.get('/getVisitorById:visitor_id', getVisitorById);
-router.patch('/updateVisitor:visitor_id', updateVisitor);
-router.delete('/deleteVisitor:visitor_id', deleteVisitor);
+const everyone  = requireRole('resident','official','super','support','readonly');
+const canWrite  = requireRole('resident','official','super','support');
+const officialW = requireRole('official','super','support');
+const official  = requireRole('official','super','support','readonly');
 
-module.exports = router;   // Register a visitor
+// Specific paths first
+router.get   ('/mine',                    everyone,  c.listMyPasses);
+router.get   ('/estate/:estateId',        official,  c.listEstatePasses);
+router.get   ('/estate/:estateId/stats',  official,  c.getEstatePassStats);
+router.post  ('/verify',                  officialW, c.verifyPass);   // gate
+router.get   ('/:id',                     everyone,  c.getPass);
+router.post  ('/',                        canWrite,  c.createPass);
+router.post  ('/:id/cancel',              canWrite,  c.cancelPass);
+router.post  ('/:id/extend',              canWrite,  c.extendPass);
 
+module.exports = router;
