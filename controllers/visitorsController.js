@@ -1,6 +1,8 @@
 // controllers/visitorsController.js
 const db = require('../config/db');
 const redisClient = require('../config/redis');
+const { queueSms } = require('../services/smsService');
+const templates = require('../services/smsTemplates');
 
 // ============================================================
 // Helpers
@@ -296,6 +298,44 @@ exports.verifyPass = async (req, res) => {
       direction,
       gate_name: gate_name || null,
     });
+
+    // ---- Notify household that the visitor arrived (IN only) ----
+    if (direction === 'IN') {
+      (async () => {
+        try {
+          const [[household]] = await db.promise().query(
+            `SELECT primary_owner, contact_number
+             FROM households
+             WHERE household_id = ?
+             LIMIT 1`,
+            [pass.household_id]
+          );
+
+          if (!household?.contact_number) {
+            console.warn(
+              'visitorArrived SMS skipped — no contact_number for household',
+              pass.household_id
+            );
+            return;
+          }
+
+          const message = templates.visitorArrived({
+            name: household.primary_owner || 'resident',
+            visitorName: pass.visitor_name,
+            gateName: gate_name || '',
+          });
+
+          await queueSms(household.contact_number, message, {
+            kind: 'visitor_arrived',
+            user_uid: uid,
+            estate_id: pass.estate_id,
+          });
+        } catch (e) {
+          console.warn('visitor arrived SMS failed:', e.message);
+        }
+      })();
+    }
+    // ---- End SMS ----
 
     return res.json({
       message: `Visitor ${direction === 'OUT' ? 'exited' : 'entered'}`,

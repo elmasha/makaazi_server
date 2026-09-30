@@ -65,4 +65,12 @@ module.exports = {
     parts.push(`- Makaazi`);
     return parts.join(' ');
   },
+
+  /* ============================================================
+   * 6. VISITOR ARRIVED — gate verified the pass
+   * ============================================================ */
+  visitorArrived: ({ name, visitorName, gateName }) => {
+    const gate = gateName ? ` at the ${gateName}` : '';
+    return `Hi ${name}, your visitor ${visitorName} has been checked in${gate}. - Makaazi`;
+  },
 };
