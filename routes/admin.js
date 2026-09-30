@@ -105,22 +105,29 @@ router.patch('/admins/:id', requireRole('super'), ctrl.updateAdmin);
 router.delete('/admins/:id', requireRole('super'), ctrl.removeAdmin);
 router.get('/admins/eligible-users', requireRole('super'), ctrl.listEligibleAdminUsers);
 
+// ------------------------------------------------------------
+// Vehicles (any admin)
+// ------------------------------------------------------------
+router.get   ('/vehicles',                 ctrl.listAllVehicles);
+router.post  ('/vehicles',                 ctrl.adminCreateVehicle);
+router.get   ('/vehicle-stats',            ctrl.getAdminVehicleStats);         // ← BEFORE /vehicles/:id
+router.get   ('/vehicles/:id',             ctrl.getVehicleById);
+router.patch ('/vehicles/:id',             ctrl.adminUpdateVehicle);
+router.post  ('/vehicles/:id/approve',     ctrl.adminApproveVehicle);
+router.post  ('/vehicles/:id/suspend',     ctrl.adminSuspendVehicle);
+router.delete('/vehicles/:id',             ctrl.adminDeleteVehicle);
 
-// ---------- vehicles ----------
-router.get   ('/vehicles',                 verifyAdmin, c.listAllVehicles);
-router.get   ('/vehicles/:id',             verifyAdmin, c.getVehicleById);
-router.post  ('/vehicles',                 verifyAdmin, c.adminCreateVehicle);
-router.patch ('/vehicles/:id',             verifyAdmin, c.adminUpdateVehicle);
-router.post  ('/vehicles/:id/approve',     verifyAdmin, c.adminApproveVehicle);
-router.post  ('/vehicles/:id/suspend',     verifyAdmin, c.adminSuspendVehicle);
-router.delete('/vehicles/:id',             verifyAdmin, c.adminDeleteVehicle);
+// ------------------------------------------------------------
+// Visitor passes (any admin)
+// ------------------------------------------------------------
+router.get   ('/visitor-passes',           ctrl.listAllVisitorPasses);
+router.post  ('/visitor-passes/:id/cancel',ctrl.adminCancelVisitorPass);
 
-// ---------- visitor passes ----------
-router.get   ('/visitor-passes',           verifyAdmin, c.listAllVisitorPasses);
-router.post  ('/visitor-passes/:id/cancel',verifyAdmin, c.adminCancelVisitorPass);
+// ------------------------------------------------------------
+// Access logs (any admin)
+// ------------------------------------------------------------
+router.get   ('/vehicle-access-logs',      ctrl.listAllAccessLogs);
 
-// ---------- access logs ----------
-router.get   ('/vehicle-access-logs',      verifyAdmin, c.listAllAccessLogs);
-router.get   ('/vehicle-stats',            verifyAdmin, c.getAdminVehicleStats);
+module.exports = router;
 
 module.exports = router;
