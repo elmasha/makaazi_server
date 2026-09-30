@@ -40,11 +40,26 @@ function generatePassCode() {
   return out;
 }
 
+// Convert anything Date-parseable (ISO string, Date, timestamp)
+// to MySQL DATETIME format: 'YYYY-MM-DD HH:MM:SS' in UTC.
+function toMysqlDatetime(value) {
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    d.getUTCFullYear() +
+    '-' + pad(d.getUTCMonth() + 1) +
+    '-' + pad(d.getUTCDate()) +
+    ' ' + pad(d.getUTCHours()) +
+    ':' + pad(d.getUTCMinutes()) +
+    ':' + pad(d.getUTCSeconds())
+  );
+}
+
 // ============================================================
 // LIST
 // ============================================================
 
-// GET /api/visitor-passes/mine
 exports.listMyPasses = async (req, res) => {
   const uid = req.auth.uid;
   try {
@@ -61,7 +76,6 @@ exports.listMyPasses = async (req, res) => {
   }
 };
 
-// GET /api/visitor-passes/estate/:estateId
 exports.listEstatePasses = async (req, res) => {
   const { estateId } = req.params;
   const { status, search } = req.query;
@@ -96,7 +110,6 @@ exports.listEstatePasses = async (req, res) => {
   }
 };
 
-// GET /api/visitor-passes/:id
 exports.getPass = async (req, res) => {
   const { id } = req.params;
   try {
@@ -126,7 +139,6 @@ exports.getPass = async (req, res) => {
 // CREATE
 // ============================================================
 
-// POST /api/visitor-passes
 exports.createPass = async (req, res) => {
   const uid = req.auth.uid;
   const role = req.auth.role;
@@ -144,14 +156,18 @@ exports.createPass = async (req, res) => {
     });
   }
 
+  // Convert ISO strings from the frontend to MySQL DATETIME format
   const from = new Date(valid_from);
   const until = new Date(valid_until);
-  if (isNaN(from) || isNaN(until)) {
+  if (isNaN(from.getTime()) || isNaN(until.getTime())) {
     return res.status(400).json({ error: 'Invalid date format' });
   }
   if (until <= from) {
     return res.status(400).json({ error: 'valid_until must be after valid_from' });
   }
+
+  const mysqlFrom = toMysqlDatetime(valid_from);
+  const mysqlUntil = toMysqlDatetime(valid_until);
 
   try {
     let householdId = household_id || null;
@@ -193,8 +209,8 @@ exports.createPass = async (req, res) => {
         visitor_plate ? String(visitor_plate).toUpperCase().trim() : null,
         purpose || null,
         passCode,
-        valid_from,
-        valid_until,
+        mysqlFrom,
+        mysqlUntil,
       ]
     );
 
@@ -211,21 +227,8 @@ exports.createPass = async (req, res) => {
       pass_code: passCode,
     });
   } catch (err) {
-    // ---- TEMPORARY DEBUG LOGGING ----
-    console.error('=== createPass FULL ERROR ===');
-    console.error(err);
-    console.error('=== createPass payload ===');
-    console.error({
-      uid: req.auth?.uid,
-      role: req.auth?.role,
-      body: req.body,
-    });
-    // ---- END TEMPORARY ----
-    return res.status(500).json({
-      error: 'Failed to create pass',
-      detail: err.message,       // ← remove after debugging
-      code: err.code || null,    // ← remove after debugging
-    });
+    console.error('createPass error:', err.message);
+    return res.status(500).json({ error: 'Failed to create pass' });
   }
 };
 
@@ -233,7 +236,6 @@ exports.createPass = async (req, res) => {
 // VERIFY / USE
 // ============================================================
 
-// POST /api/visitor-passes/verify
 exports.verifyPass = async (req, res) => {
   const uid = req.auth.uid;
   const { pass_code, direction = 'IN', gate_name } = req.body;
@@ -317,7 +319,6 @@ exports.verifyPass = async (req, res) => {
 // CANCEL
 // ============================================================
 
-// POST /api/visitor-passes/:id/cancel
 exports.cancelPass = async (req, res) => {
   const { id } = req.params;
   const uid = req.auth.uid;
@@ -352,7 +353,6 @@ exports.cancelPass = async (req, res) => {
 // EXTEND
 // ============================================================
 
-// POST /api/visitor-passes/:id/extend
 exports.extendPass = async (req, res) => {
   const { id } = req.params;
   const uid = req.auth.uid;
@@ -374,7 +374,7 @@ exports.extendPass = async (req, res) => {
 
     await db.promise().query(
       `UPDATE visitor_passes
-       SET valid_until = DATE_ADD(GREATEST(valid_until, NOW()), INTERVAL ? HOUR)
+       SET valid_until = DATE_ADD(GREATEST(valid_until, UTC_TIMESTAMP()), INTERVAL ? HOUR)
        WHERE pass_id = ?`,
       [hours, id]
     );
@@ -391,7 +391,6 @@ exports.extendPass = async (req, res) => {
 // STATS
 // ============================================================
 
-// GET /api/visitor-passes/estate/:estateId/stats
 exports.getEstatePassStats = async (req, res) => {
   const { estateId } = req.params;
   try {
@@ -399,13 +398,13 @@ exports.getEstatePassStats = async (req, res) => {
       `SELECT
          (SELECT COUNT(*) FROM visitor_passes
           WHERE estate_id = ? AND status = 'Active'
-            AND valid_until > NOW())                       AS active_passes,
+            AND valid_until > UTC_TIMESTAMP())                       AS active_passes,
          (SELECT COUNT(*) FROM visitor_passes
-          WHERE estate_id = ? AND DATE(created_at) = CURDATE()) AS created_today,
+          WHERE estate_id = ? AND DATE(created_at) = CURDATE())       AS created_today,
          (SELECT COUNT(*) FROM visitor_passes
-          WHERE estate_id = ? AND status = 'Used')          AS used_total,
+          WHERE estate_id = ? AND status = 'Used')                    AS used_total,
          (SELECT COUNT(*) FROM visitor_passes
-          WHERE estate_id = ? AND status = 'Expired')       AS expired_total`,
+          WHERE estate_id = ? AND status = 'Expired')                 AS expired_total`,
       [estateId, estateId, estateId, estateId]
     );
     return res.json(stats);
