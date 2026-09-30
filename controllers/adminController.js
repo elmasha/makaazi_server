@@ -1689,3 +1689,322 @@ exports.deleteSubscriptionPlan = async (req, res) => {
     return res.status(500).json({ error: 'Failed to delete plan' });
   }
 };
+
+
+
+// ============================================================
+// ADMIN: VEHICLES
+// ============================================================
+
+// GET /api/admin/vehicles
+// Query: ?estate_id=&status=&search=
+exports.listAllVehicles = async (req, res) => {
+  const { estate_id, status, search } = req.query;
+
+  try {
+    let sql = `
+      SELECT
+        v.vehicle_id, v.estate_id, v.household_id, v.owner_uid,
+        v.plate_number, v.make, v.model, v.color, v.year,
+        v.vehicle_type, v.sticker_number, v.parking_slot,
+        v.status, v.created_at, v.approved_at,
+        h.primary_owner AS household_owner,
+        h.contact_number AS household_phone,
+        h.house_number,
+        e.estate_name, e.estate_urn
+      FROM vehicles v
+      LEFT JOIN households h ON h.household_id = v.household_id
+      LEFT JOIN estates    e ON e.estate_id    = v.estate_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (estate_id) { sql += ` AND v.estate_id = ?`; params.push(estate_id); }
+    if (status)    { sql += ` AND v.status = ?`;    params.push(status); }
+    if (search) {
+      sql += ` AND (v.plate_number LIKE ? OR v.make LIKE ? OR v.model LIKE ?
+                   OR h.primary_owner LIKE ? OR e.estate_name LIKE ?)`;
+      const p = `%${search}%`;
+      params.push(p, p, p, p, p);
+    }
+
+    sql += ` ORDER BY v.created_at DESC LIMIT 500`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listAllVehicles error:', err.message);
+    return res.status(500).json({ error: 'Failed to list vehicles' });
+  }
+};
+
+// GET /api/admin/vehicles/:id
+exports.getVehicleById = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [[row]] = await db.promise().query(
+      `SELECT v.*, h.primary_owner, h.contact_number, h.house_number,
+              e.estate_name, e.estate_urn
+       FROM vehicles v
+       LEFT JOIN households h ON h.household_id = v.household_id
+       LEFT JOIN estates    e ON e.estate_id    = v.estate_id
+       WHERE v.vehicle_id = ? LIMIT 1`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Vehicle not found' });
+    return res.json(row);
+  } catch (err) {
+    console.error('getVehicleById error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch vehicle' });
+  }
+};
+
+// POST /api/admin/vehicles
+// Admin can create a vehicle on behalf of any household
+exports.adminCreateVehicle = async (req, res) => {
+  const {
+    estate_id, household_id, plate_number,
+    make, model, color, year, vehicle_type,
+    sticker_number, parking_slot, notes, status,
+  } = req.body;
+
+  if (!estate_id || !plate_number) {
+    return res.status(400).json({ error: 'estate_id and plate_number are required' });
+  }
+
+  try {
+    const [result] = await db.promise().query(
+      `INSERT INTO vehicles
+         (estate_id, household_id, plate_number, make, model, color, year,
+          vehicle_type, sticker_number, parking_slot, notes, status, created_by_uid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        estate_id, household_id || null,
+        String(plate_number).toUpperCase().trim(),
+        make || null, model || null, color || null, year || null,
+        vehicle_type || 'car',
+        sticker_number || null, parking_slot || null, notes || null,
+        status || 'Active',
+        req.admin?.uid || null,
+      ]
+    );
+
+    await redisClient.del(`vehicles:estate:${estate_id}`);
+    await logAdminAction(req.admin?.email, 'admin_create_vehicle', 'vehicle', result.insertId, {
+      plate_number, estate_id, household_id,
+    });
+
+    return res.status(201).json({
+      message: 'Vehicle created',
+      vehicle_id: result.insertId,
+    });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'This plate is already registered in this estate' });
+    }
+    console.error('adminCreateVehicle error:', err.message);
+    return res.status(500).json({ error: 'Failed to create vehicle' });
+  }
+};
+
+// PATCH /api/admin/vehicles/:id
+exports.adminUpdateVehicle = async (req, res) => {
+  const { id } = req.params;
+  const allowed = [
+    'plate_number', 'make', 'model', 'color', 'year',
+    'vehicle_type', 'sticker_number', 'parking_slot',
+    'status', 'notes', 'household_id',
+  ];
+  const updates = {};
+  for (const k of allowed) if (req.body[k] !== undefined) updates[k] = req.body[k];
+
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+  if (updates.plate_number) {
+    updates.plate_number = String(updates.plate_number).toUpperCase().trim();
+  }
+
+  const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+  const values = [...Object.values(updates), id];
+
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE vehicles SET ${setters} WHERE vehicle_id = ?`, values
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Vehicle not found' });
+
+    await logAdminAction(req.admin?.email, 'admin_update_vehicle', 'vehicle', Number(id), updates);
+    return res.json({ message: 'Vehicle updated' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Duplicate plate for this estate' });
+    }
+    console.error('adminUpdateVehicle error:', err.message);
+    return res.status(500).json({ error: 'Failed to update vehicle' });
+  }
+};
+
+// POST /api/admin/vehicles/:id/approve
+exports.adminApproveVehicle = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE vehicles
+       SET status = 'Active', approved_by_uid = ?, approved_at = NOW()
+       WHERE vehicle_id = ?`,
+      [req.admin?.uid || null, id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Vehicle not found' });
+
+    await logAdminAction(req.admin?.email, 'admin_approve_vehicle', 'vehicle', Number(id), null);
+    return res.json({ message: 'Vehicle approved' });
+  } catch (err) {
+    console.error('adminApproveVehicle error:', err.message);
+    return res.status(500).json({ error: 'Failed to approve' });
+  }
+};
+
+// POST /api/admin/vehicles/:id/suspend
+exports.adminSuspendVehicle = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE vehicles SET status = 'Suspended' WHERE vehicle_id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Vehicle not found' });
+
+    await logAdminAction(req.admin?.email, 'admin_suspend_vehicle', 'vehicle', Number(id), null);
+    return res.json({ message: 'Vehicle suspended' });
+  } catch (err) {
+    console.error('adminSuspendVehicle error:', err.message);
+    return res.status(500).json({ error: 'Failed to suspend' });
+  }
+};
+
+// DELETE /api/admin/vehicles/:id
+exports.adminDeleteVehicle = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `DELETE FROM vehicles WHERE vehicle_id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Vehicle not found' });
+
+    await logAdminAction(req.admin?.email, 'admin_delete_vehicle', 'vehicle', Number(id), null);
+    return res.json({ message: 'Vehicle removed' });
+  } catch (err) {
+    console.error('adminDeleteVehicle error:', err.message);
+    return res.status(500).json({ error: 'Failed to delete vehicle' });
+  }
+};
+
+// ============================================================
+// ADMIN: VISITOR PASSES
+// ============================================================
+
+// GET /api/admin/visitor-passes
+exports.listAllVisitorPasses = async (req, res) => {
+  const { estate_id, status, search } = req.query;
+  try {
+    let sql = `
+      SELECT p.*, e.estate_name, e.estate_urn,
+             h.primary_owner AS host_name, h.contact_number AS host_phone
+      FROM visitor_passes p
+      LEFT JOIN estates    e ON e.estate_id    = p.estate_id
+      LEFT JOIN households h ON h.household_id = p.household_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (estate_id) { sql += ` AND p.estate_id = ?`; params.push(estate_id); }
+    if (status)    { sql += ` AND p.status = ?`;    params.push(status); }
+    if (search) {
+      sql += ` AND (p.visitor_name LIKE ? OR p.visitor_phone LIKE ?
+                   OR p.visitor_plate LIKE ? OR p.pass_code LIKE ?
+                   OR e.estate_name LIKE ?)`;
+      const s = `%${search}%`;
+      params.push(s, s, s, s, s);
+    }
+
+    sql += ` ORDER BY p.created_at DESC LIMIT 500`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listAllVisitorPasses error:', err.message);
+    return res.status(500).json({ error: 'Failed to list passes' });
+  }
+};
+
+// POST /api/admin/visitor-passes/:id/cancel
+exports.adminCancelVisitorPass = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE visitor_passes SET status = 'Cancelled' WHERE pass_id = ?`, [id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: 'Pass not found' });
+
+    await logAdminAction(req.admin?.email, 'admin_cancel_pass', 'visitor_pass', Number(id), null);
+    return res.json({ message: 'Pass cancelled' });
+  } catch (err) {
+    console.error('adminCancelVisitorPass error:', err.message);
+    return res.status(500).json({ error: 'Failed to cancel pass' });
+  }
+};
+
+// ============================================================
+// ADMIN: ACCESS LOGS
+// ============================================================
+
+// GET /api/admin/vehicle-access-logs
+exports.listAllAccessLogs = async (req, res) => {
+  const { estate_id, plate, from, to } = req.query;
+  try {
+    let sql = `
+      SELECT l.*, e.estate_name, e.estate_urn,
+             v.make, v.model, v.color,
+             p.visitor_name
+      FROM vehicle_access_logs l
+      LEFT JOIN estates        e ON e.estate_id = l.estate_id
+      LEFT JOIN vehicles       v ON v.vehicle_id = l.vehicle_id
+      LEFT JOIN visitor_passes p ON p.pass_id    = l.pass_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (estate_id) { sql += ` AND l.estate_id = ?`; params.push(estate_id); }
+    if (plate)     { sql += ` AND l.plate_number LIKE ?`; params.push(`%${plate}%`); }
+    if (from)      { sql += ` AND l.created_at >= ?`;     params.push(from); }
+    if (to)        { sql += ` AND l.created_at <= ?`;     params.push(to); }
+
+    sql += ` ORDER BY l.created_at DESC LIMIT 500`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listAllAccessLogs error:', err.message);
+    return res.status(500).json({ error: 'Failed to list logs' });
+  }
+};
+
+// GET /api/admin/vehicle-stats
+exports.getAdminVehicleStats = async (req, res) => {
+  try {
+    const [[stats]] = await db.promise().query(`
+      SELECT
+        (SELECT COUNT(*) FROM vehicles WHERE status = 'Active')    AS active_vehicles,
+        (SELECT COUNT(*) FROM vehicles WHERE status = 'Pending')   AS pending_vehicles,
+        (SELECT COUNT(*) FROM vehicles)                            AS total_vehicles,
+        (SELECT COUNT(*) FROM visitor_passes
+         WHERE status = 'Active' AND valid_until > NOW())          AS active_passes,
+        (SELECT COUNT(*) FROM vehicle_access_logs
+         WHERE DATE(created_at) = CURDATE())                       AS today_entries
+    `);
+    return res.json(stats);
+  } catch (err) {
+    console.error('getAdminVehicleStats error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+};
