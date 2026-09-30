@@ -35,7 +35,6 @@ app.use('/api/officials', require('./routes/officials'));
 app.use('/api/households', require('./routes/households'));
 app.use('/api/workers', require('./routes/workers'));
 app.use('/api/payments', require('./routes/payments'));
-app.use('/api/visitors', require('./routes/visitors'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/notifications', require('./routes/notifications'));
@@ -51,7 +50,7 @@ app.use("/api/fcm",  require("./routes/fcm"));
 app.use("/api/household-payments", require('./routes/householdPayments'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/vehicles',        require('./routes/vehicles'));
-app.use('/api/visitor-passes',  require('./routes/visitorPasses'));
+app.use('/api/visitor-passes',  require('./routes/visitors'));
 // Start the Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
