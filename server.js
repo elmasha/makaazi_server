@@ -51,7 +51,7 @@ app.use("/api/household-payments", require('./routes/householdPayments'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/vehicles',        require('./routes/vehicles'));
 app.use('/api/visitor-passes',  require('./routes/visitors'));
-// Start the Server
+// Start the Server-----
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Makaazi Server running on http://localhost:${PORT}`);
