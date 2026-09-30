@@ -69,8 +69,21 @@ module.exports = {
   /* ============================================================
    * 6. VISITOR ARRIVED — gate verified the pass
    * ============================================================ */
-  visitorArrived: ({ name, visitorName, gateName }) => {
-    const gate = gateName ? ` at the ${gateName}` : '';
-    return `Hi ${name}, your visitor ${visitorName} has been checked in${gate}. - Makaazi`;
-  },
+  /* ============================================================
+ * 6. VISITOR PASS CREATED — SMS to the VISITOR with check-in link
+ * ============================================================ */
+visitorPassCreated: ({ visitorName, hostName, estateName, checkinUrl, validUntil }) => {
+  const until = new Date(validUntil).toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+  return `Hi ${visitorName}, ${hostName} has invited you to ${estateName}. Check in when you arrive: ${checkinUrl}. Valid until ${until}. - Makaazi`;
+},
+
+/* ============================================================
+ * 7. VISITOR ARRIVED — SMS to the RESIDENT on check-in
+ * ============================================================ */
+visitorArrived: ({ name, visitorName, gateName }) => {
+  const gate = gateName ? ` at the ${gateName}` : '';
+  return `Hi ${name}, your visitor ${visitorName} has been checked in${gate}. - Makaazi`;
+},
 };

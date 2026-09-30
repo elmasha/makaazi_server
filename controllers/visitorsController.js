@@ -4,6 +4,8 @@ const redisClient = require('../config/redis');
 const { queueSms } = require('../services/smsService');
 const templates = require('../services/smsTemplates');
 
+const APP_URL = process.env.APP_URL || 'https://makaazi.app';
+
 // ============================================================
 // Helpers
 // ============================================================
@@ -42,8 +44,6 @@ function generatePassCode() {
   return out;
 }
 
-// Convert anything Date-parseable (ISO string, Date, timestamp)
-// to MySQL DATETIME format: 'YYYY-MM-DD HH:MM:SS' in UTC.
 function toMysqlDatetime(value) {
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;
@@ -58,8 +58,170 @@ function toMysqlDatetime(value) {
   );
 }
 
+// Normalize Kenyan phone numbers to 2547XXXXXXXX form.
+function normalizeKenyanPhone(phone) {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('254')) return digits;
+  if (digits.startsWith('0'))   return '254' + digits.slice(1);
+  if (digits.length === 9)      return '254' + digits;
+  return digits;
+}
+
 // ============================================================
-// LIST
+// PUBLIC — no auth
+// ============================================================
+
+// GET /api/visitor-passes/public/:code
+// Used by the /checkin/:code page to render pass details before confirming.
+exports.getPublicPass = async (req, res) => {
+  const { code } = req.params;
+  try {
+    const [[pass]] = await db.promise().query(
+      `SELECT p.pass_id, p.pass_code, p.visitor_name, p.visitor_phone,
+              p.status, p.valid_from, p.valid_until, p.used_at,
+              h.primary_owner AS host_name,
+              e.estate_name
+       FROM visitor_passes p
+       LEFT JOIN households h ON h.household_id = p.household_id
+       LEFT JOIN estates    e ON e.estate_id    = p.estate_id
+       WHERE p.pass_code = ?
+       LIMIT 1`,
+      [String(code).toUpperCase().trim()]
+    );
+
+    if (!pass) return res.status(404).json({ error: 'Pass not found' });
+
+    const now = new Date();
+    let effective_status = pass.status;
+    if (pass.status === 'Active' && now > new Date(pass.valid_until)) {
+      effective_status = 'Expired';
+    }
+
+    return res.json({
+      pass_code:   pass.pass_code,
+      visitor_name: pass.visitor_name,
+      host_name:   pass.host_name || 'your host',
+      estate_name: pass.estate_name || 'the estate',
+      valid_from:  pass.valid_from,
+      valid_until: pass.valid_until,
+      used_at:     pass.used_at,
+      status:      effective_status,
+      can_checkin: effective_status === 'Active',
+    });
+  } catch (err) {
+    console.error('getPublicPass error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch pass' });
+  }
+};
+
+// POST /api/visitor-passes/checkin/:code
+// Visitor taps "I'm here". Marks the pass used, notifies the resident.
+exports.checkinPass = async (req, res) => {
+  const { code } = req.params;
+
+  try {
+    const [[pass]] = await db.promise().query(
+      `SELECT * FROM visitor_passes WHERE pass_code = ? LIMIT 1`,
+      [String(code).toUpperCase().trim()]
+    );
+    if (!pass) return res.status(404).json({ error: 'Pass not found' });
+
+    if (pass.status === 'Cancelled') {
+      return res.status(400).json({ error: 'This pass has been cancelled' });
+    }
+    if (pass.status === 'Used') {
+      return res.status(400).json({ error: 'This pass has already been used' });
+    }
+    if (pass.status === 'Expired') {
+      return res.status(400).json({ error: 'This pass has expired' });
+    }
+
+    const now = new Date();
+    if (now < new Date(pass.valid_from)) {
+      return res.status(400).json({ error: 'This pass is not yet valid' });
+    }
+    if (now > new Date(pass.valid_until)) {
+      await db.promise().query(
+        `UPDATE visitor_passes SET status = 'Expired' WHERE pass_id = ?`,
+        [pass.pass_id]
+      );
+      return res.status(400).json({ error: 'This pass has expired' });
+    }
+
+    // Mark used
+    await db.promise().query(
+      `UPDATE visitor_passes
+       SET status = 'Used', used_at = UTC_TIMESTAMP()
+       WHERE pass_id = ?`,
+      [pass.pass_id]
+    );
+
+    // Access log — self check-in
+    await db.promise().query(
+      `INSERT INTO vehicle_access_logs
+         (estate_id, pass_id, plate_number, direction, gate_name, logged_by_uid, notes)
+       VALUES (?, ?, ?, 'IN', ?, NULL, 'self-check-in')`,
+      [
+        pass.estate_id,
+        pass.pass_id,
+        pass.visitor_plate || null,
+        req.body?.gate_name || 'Self check-in',
+      ]
+    );
+
+    await logAction(null, 'self_checkin_visitor_pass', 'visitor_pass', pass.pass_id, {
+      pass_code: pass.pass_code,
+      method: 'self_checkin',
+    });
+
+    // Notify the resident (background)
+    (async () => {
+      try {
+        const [[household]] = await db.promise().query(
+          `SELECT primary_owner, contact_number
+           FROM households
+           WHERE household_id = ?
+           LIMIT 1`,
+          [pass.household_id]
+        );
+        if (!household?.contact_number) {
+          console.warn('checkinPass SMS skipped — no contact_number', pass.household_id);
+          return;
+        }
+        const message = templates.visitorArrived({
+          name: household.primary_owner || 'resident',
+          visitorName: pass.visitor_name,
+          gateName: req.body?.gate_name || '',
+        });
+        await queueSms(normalizeKenyanPhone(household.contact_number), message, {
+          kind: 'visitor_arrived',
+          estate_id: pass.estate_id,
+        });
+      } catch (e) {
+        console.warn('checkinPass SMS failed:', e.message);
+      }
+    })();
+
+    return res.json({
+      message: 'Checked in',
+      pass: {
+        pass_id: pass.pass_id,
+        pass_code: pass.pass_code,
+        visitor_name: pass.visitor_name,
+        host_name: null,
+        used_at: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error('checkinPass error:', err.message);
+    return res.status(500).json({ error: 'Failed to check in' });
+  }
+};
+
+// ============================================================
+// AUTHENTICATED
 // ============================================================
 
 exports.listMyPasses = async (req, res) => {
@@ -137,10 +299,6 @@ exports.getPass = async (req, res) => {
   }
 };
 
-// ============================================================
-// CREATE
-// ============================================================
-
 exports.createPass = async (req, res) => {
   const uid = req.auth.uid;
   const role = req.auth.role;
@@ -158,7 +316,6 @@ exports.createPass = async (req, res) => {
     });
   }
 
-  // Convert ISO strings from the frontend to MySQL DATETIME format
   const from = new Date(valid_from);
   const until = new Date(valid_until);
   if (isNaN(from.getTime()) || isNaN(until.getTime())) {
@@ -223,20 +380,52 @@ exports.createPass = async (req, res) => {
     });
     await redisClient.del(`passes:estate:${estate_id}`);
 
+    // ---- SMS to the VISITOR with check-in link ----
+    const visitorPhone = normalizeKenyanPhone(visitor_phone);
+    if (visitorPhone) {
+      (async () => {
+        try {
+          const [[host]] = await db.promise().query(
+            `SELECT primary_owner FROM households WHERE household_id = ? LIMIT 1`,
+            [householdId]
+          );
+          const [[estate]] = await db.promise().query(
+            `SELECT estate_name FROM estates WHERE estate_id = ? LIMIT 1`,
+            [estate_id]
+          );
+
+          const checkinUrl = `${APP_URL}/checkin/${passCode}`;
+          const message = templates.visitorPassCreated({
+            visitorName: visitor_name,
+            hostName: host?.primary_owner || 'Your host',
+            estateName: estate?.estate_name || 'the estate',
+            checkinUrl,
+            validUntil: valid_until,
+          });
+
+          await queueSms(visitorPhone, message, {
+            kind: 'visitor_pass_created',
+            user_uid: uid,
+            estate_id,
+          });
+        } catch (e) {
+          console.warn('visitor pass SMS failed:', e.message);
+        }
+      })();
+    }
+    // ---- End SMS ----
+
     return res.status(201).json({
       message: 'Visitor pass created',
       pass_id: result.insertId,
       pass_code: passCode,
+      checkin_url: `${APP_URL}/checkin/${passCode}`,
     });
   } catch (err) {
     console.error('createPass error:', err.message);
     return res.status(500).json({ error: 'Failed to create pass' });
   }
 };
-
-// ============================================================
-// VERIFY / USE
-// ============================================================
 
 exports.verifyPass = async (req, res) => {
   const uid = req.auth.uid;
@@ -287,7 +476,7 @@ exports.verifyPass = async (req, res) => {
     if (direction === 'IN' && pass.status === 'Active') {
       await db.promise().query(
         `UPDATE visitor_passes
-         SET status = 'Used', used_at = NOW()
+         SET status = 'Used', used_at = UTC_TIMESTAMP()
          WHERE pass_id = ?`,
         [pass.pass_id]
       );
@@ -299,7 +488,6 @@ exports.verifyPass = async (req, res) => {
       gate_name: gate_name || null,
     });
 
-    // ---- Notify household that the visitor arrived (IN only) ----
     if (direction === 'IN') {
       (async () => {
         try {
@@ -310,22 +498,13 @@ exports.verifyPass = async (req, res) => {
              LIMIT 1`,
             [pass.household_id]
           );
-
-          if (!household?.contact_number) {
-            console.warn(
-              'visitorArrived SMS skipped — no contact_number for household',
-              pass.household_id
-            );
-            return;
-          }
-
+          if (!household?.contact_number) return;
           const message = templates.visitorArrived({
             name: household.primary_owner || 'resident',
             visitorName: pass.visitor_name,
             gateName: gate_name || '',
           });
-
-          await queueSms(household.contact_number, message, {
+          await queueSms(normalizeKenyanPhone(household.contact_number), message, {
             kind: 'visitor_arrived',
             user_uid: uid,
             estate_id: pass.estate_id,
@@ -335,7 +514,6 @@ exports.verifyPass = async (req, res) => {
         }
       })();
     }
-    // ---- End SMS ----
 
     return res.json({
       message: `Visitor ${direction === 'OUT' ? 'exited' : 'entered'}`,
@@ -354,10 +532,6 @@ exports.verifyPass = async (req, res) => {
     return res.status(500).json({ error: 'Failed to verify pass' });
   }
 };
-
-// ============================================================
-// CANCEL
-// ============================================================
 
 exports.cancelPass = async (req, res) => {
   const { id } = req.params;
@@ -388,10 +562,6 @@ exports.cancelPass = async (req, res) => {
     return res.status(500).json({ error: 'Failed to cancel pass' });
   }
 };
-
-// ============================================================
-// EXTEND
-// ============================================================
 
 exports.extendPass = async (req, res) => {
   const { id } = req.params;
@@ -426,10 +596,6 @@ exports.extendPass = async (req, res) => {
     return res.status(500).json({ error: 'Failed to extend pass' });
   }
 };
-
-// ============================================================
-// STATS
-// ============================================================
 
 exports.getEstatePassStats = async (req, res) => {
   const { estateId } = req.params;
