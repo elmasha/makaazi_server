@@ -1,4 +1,4 @@
-// controllers/visitorPassController.js
+// controllers/visitorsController.js
 const db = require('../config/db');
 const redisClient = require('../config/redis');
 
@@ -31,7 +31,6 @@ async function logAction(actorUid, action, entityType, entityId, details) {
   }
 }
 
-// 8-char code from an unambiguous alphabet (no 0/O/1/I)
 function generatePassCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
@@ -45,9 +44,7 @@ function generatePassCode() {
 // LIST
 // ============================================================
 
-// ------------------------------------------------------------
 // GET /api/visitor-passes/mine
-// ------------------------------------------------------------
 exports.listMyPasses = async (req, res) => {
   const uid = req.auth.uid;
   try {
@@ -64,10 +61,7 @@ exports.listMyPasses = async (req, res) => {
   }
 };
 
-// ------------------------------------------------------------
 // GET /api/visitor-passes/estate/:estateId
-// Query: ?status=
-// ------------------------------------------------------------
 exports.listEstatePasses = async (req, res) => {
   const { estateId } = req.params;
   const { status, search } = req.query;
@@ -102,9 +96,7 @@ exports.listEstatePasses = async (req, res) => {
   }
 };
 
-// ------------------------------------------------------------
 // GET /api/visitor-passes/:id
-// ------------------------------------------------------------
 exports.getPass = async (req, res) => {
   const { id } = req.params;
   try {
@@ -119,7 +111,6 @@ exports.getPass = async (req, res) => {
     );
     if (!row) return res.status(404).json({ error: 'Pass not found' });
 
-    // Residents can only see their own
     if (req.auth.role === 'resident' && row.host_uid !== req.auth.uid) {
       return res.status(403).json({ error: 'Not your pass' });
     }
@@ -135,12 +126,7 @@ exports.getPass = async (req, res) => {
 // CREATE
 // ============================================================
 
-// ------------------------------------------------------------
 // POST /api/visitor-passes
-// Body: { estate_id, visitor_name, visitor_phone?, visitor_plate?,
-//         purpose?, valid_from, valid_until }
-// Residents create for themselves; officials can create for any household.
-// ------------------------------------------------------------
 exports.createPass = async (req, res) => {
   const uid = req.auth.uid;
   const role = req.auth.role;
@@ -179,7 +165,6 @@ exports.createPass = async (req, res) => {
       householdId = me.household_id;
     }
 
-    // Generate a unique code (retry up to 5 times)
     let passCode = null;
     for (let i = 0; i < 5; i++) {
       const candidate = generatePassCode();
@@ -226,19 +211,29 @@ exports.createPass = async (req, res) => {
       pass_code: passCode,
     });
   } catch (err) {
-    console.error('createPass error:', err.message);
-    return res.status(500).json({ error: 'Failed to create pass' });
+    // ---- TEMPORARY DEBUG LOGGING ----
+    console.error('=== createPass FULL ERROR ===');
+    console.error(err);
+    console.error('=== createPass payload ===');
+    console.error({
+      uid: req.auth?.uid,
+      role: req.auth?.role,
+      body: req.body,
+    });
+    // ---- END TEMPORARY ----
+    return res.status(500).json({
+      error: 'Failed to create pass',
+      detail: err.message,       // ← remove after debugging
+      code: err.code || null,    // ← remove after debugging
+    });
   }
 };
 
 // ============================================================
-// VERIFY / USE   (guard at the gate)
+// VERIFY / USE
 // ============================================================
 
-// ------------------------------------------------------------
 // POST /api/visitor-passes/verify
-// Body: { pass_code, direction: 'IN'|'OUT', gate_name? }
-// ------------------------------------------------------------
 exports.verifyPass = async (req, res) => {
   const uid = req.auth.uid;
   const { pass_code, direction = 'IN', gate_name } = req.body;
@@ -271,7 +266,6 @@ exports.verifyPass = async (req, res) => {
       return res.status(400).json({ error: 'Pass has expired' });
     }
 
-    // Log the entry / exit
     await db.promise().query(
       `INSERT INTO vehicle_access_logs
          (estate_id, pass_id, plate_number, direction, gate_name, logged_by_uid)
@@ -286,7 +280,6 @@ exports.verifyPass = async (req, res) => {
       ]
     );
 
-    // First IN marks the pass as Used
     if (direction === 'IN' && pass.status === 'Active') {
       await db.promise().query(
         `UPDATE visitor_passes
@@ -324,9 +317,7 @@ exports.verifyPass = async (req, res) => {
 // CANCEL
 // ============================================================
 
-// ------------------------------------------------------------
 // POST /api/visitor-passes/:id/cancel
-// ------------------------------------------------------------
 exports.cancelPass = async (req, res) => {
   const { id } = req.params;
   const uid = req.auth.uid;
@@ -358,11 +349,10 @@ exports.cancelPass = async (req, res) => {
 };
 
 // ============================================================
-// EXTEND (push valid_until out by some hours)
-// ------------------------------------------------------------
+// EXTEND
+// ============================================================
+
 // POST /api/visitor-passes/:id/extend
-// Body: { hours: 4 }
-// ------------------------------------------------------------
 exports.extendPass = async (req, res) => {
   const { id } = req.params;
   const uid = req.auth.uid;
@@ -399,9 +389,9 @@ exports.extendPass = async (req, res) => {
 
 // ============================================================
 // STATS
-// ------------------------------------------------------------
-// GET /api/visitor-passes/estate/:estateId/stats
 // ============================================================
+
+// GET /api/visitor-passes/estate/:estateId/stats
 exports.getEstatePassStats = async (req, res) => {
   const { estateId } = req.params;
   try {
