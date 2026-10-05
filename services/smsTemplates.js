@@ -14,14 +14,14 @@ function truncate(str, n) {
 
 module.exports = {
   /* ============================================================
-   * 1. OFFICIAL ASSIGNED — household becomes an official
+   * 1. OFFICIAL ASSIGNED
    * ============================================================ */
   officialAssigned: ({ name, role, estateName }) => {
     return `Hi ${name}, you have been appointed as ${role} of ${estateName}. Open the Makaazi app to access your official console. - Makaazi`;
   },
 
   /* ============================================================
-   * 2. OFFICIAL PROMOTED — role changed on an existing official
+   * 2. OFFICIAL PROMOTED
    * ============================================================ */
   officialPromoted: ({ name, oldRole, newRole, estateName }) => {
     const from = oldRole && oldRole !== 'none' ? `from ${oldRole} ` : '';
@@ -29,7 +29,7 @@ module.exports = {
   },
 
   /* ============================================================
-   * 3. REGISTRATION SUCCESSFUL — self-registration received
+   * 3. REGISTRATION SUCCESSFUL
    * ============================================================ */
   registrationSuccessful: ({ name, estateName, houseNumber, section, court, street }) => {
     const addr = [houseNumber && `Hs ${houseNumber}`, section, court, street]
@@ -40,7 +40,7 @@ module.exports = {
   },
 
   /* ============================================================
-   * 4. HOUSEHOLD APPROVED — official approved the registration
+   * 4. HOUSEHOLD APPROVED
    * ============================================================ */
   householdApproved: ({ name, estateName, urn, takeOnBalance }) => {
     const bal = Number(takeOnBalance || 0);
@@ -52,7 +52,7 @@ module.exports = {
   },
 
   /* ============================================================
-   * 5. PAYMENT SUCCESSFUL — M-Pesa payment confirmed
+   * 5. PAYMENT SUCCESSFUL
    * ============================================================ */
   paymentSuccessful: ({ name, amount, receipt, estateName, balance }) => {
     const parts = [
@@ -72,7 +72,7 @@ module.exports = {
   },
 
   /* ============================================================
-   * 6. VISITOR PASS CREATED — SMS to the VISITOR with check-in link
+   * 6. VISITOR PASS CREATED
    * ============================================================ */
   visitorPassCreated: ({ visitorName, hostName, estateName, checkinUrl, validUntil }) => {
     const until = new Date(validUntil).toLocaleString('en-GB', {
@@ -82,7 +82,7 @@ module.exports = {
   },
 
   /* ============================================================
-   * 7. VISITOR ARRIVED — SMS to the RESIDENT on check-in
+   * 7. VISITOR ARRIVED
    * ============================================================ */
   visitorArrived: ({ name, visitorName, gateName }) => {
     const gate = gateName ? ` at the ${gateName}` : '';
@@ -90,33 +90,32 @@ module.exports = {
   },
 
   /* ============================================================
-   * ADMIN APPROVAL — sent to super admins when a support admin
-   * requests a sensitive operation.
+   * ADMIN APPROVAL — reference is a short code like "APV-A7K2M9"
    *
-   * 8.  ESTATE — create / update / delete / config
-   * 9.  ADMIN  — add / change / remove platform admins
-   * 10. BILLING — plans + estate subscriptions
-   * 11. OFFICIAL — officials + service charges
-   * 12. GENERIC — fallback
+   * 8.  ESTATE
+   * 9.  ADMIN
+   * 10. BILLING
+   * 11. OFFICIAL
+   * 12. GENERIC
    * ============================================================ */
 
-  adminApprovalEstate: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
-    return `Makaazi [Estate ${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  adminApprovalEstate: ({ requesterEmail, action, summary, reviewUrl, reference }) => {
+    return `Makaazi [Estate ${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
 
-  adminApprovalAdmin: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
-    return `Makaazi [Admin ${action}] ⚠️ ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  adminApprovalAdmin: ({ requesterEmail, action, summary, reviewUrl, reference }) => {
+    return `Makaazi [Admin ${action}] ⚠️ ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
 
-  adminApprovalBilling: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
-    return `Makaazi [Billing ${action}] 💰 ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  adminApprovalBilling: ({ requesterEmail, action, summary, reviewUrl, reference }) => {
+    return `Makaazi [Billing ${action}] 💰 ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
 
-  adminApprovalOfficial: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
-    return `Makaazi [${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  adminApprovalOfficial: ({ requesterEmail, action, summary, reviewUrl, reference }) => {
+    return `Makaazi [${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
 
-  adminApprovalGeneric: ({ requesterEmail, summary, reviewUrl, requestId }) => {
-    return `Makaazi: ${requesterEmail} requested — ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  adminApprovalGeneric: ({ requesterEmail, summary, reviewUrl, reference }) => {
+    return `Makaazi: ${requesterEmail} requested — ${truncate(summary, 60)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
 };

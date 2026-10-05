@@ -9,8 +9,6 @@ const APP_URL = (process.env.APP_URL || 'https://makaazi.netlify.app').replace(/
  * Map operation → { group, action label }
  *   group   decides which template to use
  *   action  short human word ("create", "delete", "promote"...)
- *
- *
  */
 const OPERATION_MAP = {
   // Estate
@@ -31,7 +29,7 @@ const OPERATION_MAP = {
   'plan.update':           { group: 'billing',  action: 'plan~' },
   'plan.delete':           { group: 'billing',  action: 'plan-' },
 
-  // Official / charges ---
+  // Official / charges
   'official.create':       { group: 'official', action: 'New official' },
   'official.update':       { group: 'official', action: 'Official role' },
   'official.delete':       { group: 'official', action: 'Remove official' },
@@ -39,7 +37,7 @@ const OPERATION_MAP = {
   'charge.delete':         { group: 'official', action: 'Drop charge' },
 };
 
-function buildMessage({ operation, requesterEmail, summary, reviewUrl, requestId }) {
+function buildMessage({ operation, requesterEmail, summary, reviewUrl, reference }) {
   const meta = OPERATION_MAP[operation] || { group: 'generic', action: 'request' };
 
   const base = {
@@ -47,7 +45,7 @@ function buildMessage({ operation, requesterEmail, summary, reviewUrl, requestId
     action: meta.action,
     summary,
     reviewUrl,
-    requestId,
+    reference,
   };
 
   switch (meta.group) {
@@ -62,8 +60,14 @@ function buildMessage({ operation, requesterEmail, summary, reviewUrl, requestId
 /**
  * Fire an SMS to every active super admin with a phone number on file.
  * Never throws.
+ *
+ * @param {Object} args
+ * @param {string} args.reference        e.g. "APV-A7K2M9"
+ * @param {string} args.operation
+ * @param {string} args.summary
+ * @param {string} args.requestedEmail
  */
-async function notifySuperAdminsBySms({ requestId, operation, summary, requestedEmail }) {
+async function notifySuperAdminsBySms({ reference, operation, summary, requestedEmail }) {
   let supers = [];
   try {
     const [rows] = await db.promise().query(
@@ -85,15 +89,15 @@ async function notifySuperAdminsBySms({ requestId, operation, summary, requested
     return [];
   }
 
-  // ✅ Points at the new /admin/approve/:id route
-  const reviewUrl = `${APP_URL}/admin/approve/${requestId}`;
+  // URL uses the reference, not the numeric id
+  const reviewUrl = `${APP_URL}/admin/approve/${reference}`;
 
   const message = buildMessage({
     operation,
     requesterEmail: requestedEmail,
     summary,
     reviewUrl,
-    requestId,
+    reference,
   });
 
   const results = [];
