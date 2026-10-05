@@ -31,7 +31,7 @@ const OPERATION_MAP = {
   'plan.update':           { group: 'billing',  action: 'plan~' },
   'plan.delete':           { group: 'billing',  action: 'plan-' },
 
-  // Official / charges
+  // Official / charges ---
   'official.create':       { group: 'official', action: 'New official' },
   'official.update':       { group: 'official', action: 'Official role' },
   'official.delete':       { group: 'official', action: 'Remove official' },
