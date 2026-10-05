@@ -6,7 +6,7 @@ const { requireRole } = adminAuth;
 const ctrl = require('../controllers/adminController');
 const db = require('../config/db');
 const { notifySuperAdminsBySms } = require('../services/adminApprovalSms');
-const adminApprovalsRouter = require('./adminApprovals');
+const adminApprovalsRouter = require('../routes/adminApprovals');
 
 // ============================================================
 // Helpers
