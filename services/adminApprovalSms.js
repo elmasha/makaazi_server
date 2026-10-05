@@ -9,8 +9,8 @@ const APP_URL = (process.env.APP_URL || 'https://makaazi.netlify.app').replace(/
  * Map operation → { group, action label }
  *   group   decides which template to use
  *   action  short human word ("create", "delete", "promote"...)
- * 
- * 
+ *
+ *
  */
 const OPERATION_MAP = {
   // Estate
@@ -85,7 +85,9 @@ async function notifySuperAdminsBySms({ requestId, operation, summary, requested
     return [];
   }
 
-  const reviewUrl = `${APP_URL}/admin/approvals/${requestId}`;
+  // ✅ Points at the new /admin/approve/:id route
+  const reviewUrl = `${APP_URL}/admin/approve/${requestId}`;
+
   const message = buildMessage({
     operation,
     requesterEmail: requestedEmail,

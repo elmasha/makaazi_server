@@ -40,6 +40,7 @@ async function applyApproval(conn, approval, payload) {
   const op = approval.operation;
   const targetId = approval.target_id;
 
+  /* ---------- ESTATES ---------- */
   if (op === 'estate.create') {
     const { address_config, ...estate } = payload;
     const [ins] = await conn.query(
@@ -115,6 +116,7 @@ async function applyApproval(conn, approval, payload) {
     return targetId;
   }
 
+  /* ---------- ADMIN ACCESS ---------- */
   if (op === 'admin.create') {
     const [ins] = await conn.query(
       `INSERT INTO intec_admins (email, full_name, role, active)
@@ -144,6 +146,7 @@ async function applyApproval(conn, approval, payload) {
     return targetId;
   }
 
+  /* ---------- SUBSCRIPTIONS ---------- */
   if (op === 'subscription.upsert') {
     await conn.query(
       `INSERT INTO estate_subscriptions
@@ -207,6 +210,7 @@ async function applyApproval(conn, approval, payload) {
     return targetId;
   }
 
+  /* ---------- PLANS ---------- */
   if (op === 'plan.create') {
     const [ins] = await conn.query(
       `INSERT INTO subscription_plans
@@ -246,6 +250,7 @@ async function applyApproval(conn, approval, payload) {
     return targetId;
   }
 
+  /* ---------- OFFICIALS ---------- */
   if (op === 'official.create') {
     const [[estate]] = await conn.query(
       `SELECT estate_urn FROM estates WHERE estate_id = ? LIMIT 1`,
@@ -285,6 +290,7 @@ async function applyApproval(conn, approval, payload) {
     return targetId;
   }
 
+  /* ---------- CHARGES ---------- */
   if (op === 'charge.add') {
     const [ins] = await conn.query(
       `INSERT INTO service_charges (estate_id, charge_type, frequency, amount)
@@ -336,25 +342,37 @@ async function invalidateCacheFor(op, targetId) {
    ROUTES (super-admin only)
    ============================================================= */
 
+/**
+ * GET /api/admin/approvals
+ * Query: ?status=Pending|Approved|Rejected  (omit or pass 'all' for everything)
+ *        ?operation=estate.create            (optional)
+ */
 router.get('/', adminAuth, requireSuperAdmin, async (req, res) => {
-  const status    = req.query.status || 'Pending';
+  const status    = req.query.status;
   const operation = req.query.operation;
 
-  const where  = ['status = ?'];
-  const params = [status];
+  const where  = [];
+  const params = [];
+
+  if (status && status !== 'all') {
+    where.push('status = ?');
+    params.push(status);
+  }
   if (operation) {
     where.push('operation = ?');
     params.push(operation);
   }
 
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
   try {
     const [rows] = await db.promise().query(
-      `SELECT id, operation, target_table, target_id, payload, summary,
+      `SELECT id, reference, operation, target_table, target_id, payload, summary,
               requested_by, requested_email, status,
               reviewed_by, reviewed_email, reviewed_at, rejection_reason,
               created_at, updated_at
        FROM admin_approval_requests
-       WHERE ${where.join(' AND ')}
+       ${whereSql}
        ORDER BY created_at DESC`,
       params
     );
@@ -365,6 +383,10 @@ router.get('/', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/approvals/count
+ * Badge count — pending only.
+ */
 router.get('/count', adminAuth, requireSuperAdmin, async (req, res) => {
   try {
     const [[row]] = await db.promise().query(
@@ -379,17 +401,25 @@ router.get('/count', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-router.get('/:id', adminAuth, requireSuperAdmin, async (req, res) => {
-  const id = Number(req.params.id);
+/**
+ * GET /api/admin/approvals/:key
+ * Accepts either the numeric id (42) or the reference code (APV-A7K2M9).
+ */
+router.get('/:key', adminAuth, requireSuperAdmin, async (req, res) => {
+  const key = req.params.key;
+  const isNumeric = /^\d+$/.test(key);
+  const column = isNumeric ? 'id' : 'reference';
+
   try {
     const [[row]] = await db.promise().query(
-      `SELECT id, operation, target_table, target_id, payload, summary,
+      `SELECT id, reference, operation, target_table, target_id, payload, summary,
               requested_by, requested_email, status,
               reviewed_by, reviewed_email, reviewed_at, rejection_reason,
               created_at, updated_at
        FROM admin_approval_requests
-       WHERE id = ? LIMIT 1`,
-      [id]
+       WHERE ${column} = ?
+       LIMIT 1`,
+      [key]
     );
     if (!row) return res.status(404).json({ error: 'Request not found' });
     return res.json(row);
@@ -399,6 +429,10 @@ router.get('/:id', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/approvals/:id/approve
+ * Uses the numeric id — the reference is only for display.
+ */
 router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
   const id = Number(req.params.id);
 
@@ -448,6 +482,7 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
       finalTargetId,
       {
         request_id: id,
+        reference: approval.reference,
         operation: approval.operation,
         requested_by: approval.requested_email,
       }
@@ -473,6 +508,7 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
       ok: true,
       operation: approval.operation,
       target_id: finalTargetId,
+      reference: approval.reference,
     });
   } catch (err) {
     try { await connection.rollback(); } catch {}
@@ -483,6 +519,9 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/approvals/:id/reject
+ */
 router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const { reason } = req.body || {};
@@ -511,7 +550,12 @@ router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
       'reject_request',
       approval.target_table,
       approval.target_id,
-      { request_id: id, operation: approval.operation, reason: reason || null }
+      {
+        request_id: id,
+        reference: approval.reference,
+        operation: approval.operation,
+        reason: reason || null,
+      }
     );
 
     try {

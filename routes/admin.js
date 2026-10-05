@@ -7,6 +7,7 @@ const ctrl = require('../controllers/adminController');
 const db = require('../config/db');
 const { notifySuperAdminsBySms } = require('../services/adminApprovalSms');
 const adminApprovalsRouter = require('../routes/adminApprovals');
+const { generateReference } = require('../utils/generateReference');   // ← NEW
 
 // ============================================================
 // Helpers
@@ -48,12 +49,16 @@ function gated(operation, opts = {}) {
       const summary  = summaryFn(req, payload);
       const targetId = targetIdFn(req);
 
+      // ── Generate a short unique reference (e.g. "APV-A7K2M9") ──
+      const reference = generateReference();
+
       const [ins] = await db.promise().query(
         `INSERT INTO admin_approval_requests
-           (operation, target_table, target_id, payload, summary,
+           (reference, operation, target_table, target_id, payload, summary,
             requested_by, requested_email, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`,
         [
+          reference,
           operation,
           targetTable,
           targetId,
@@ -64,9 +69,9 @@ function gated(operation, opts = {}) {
         ]
       );
 
-      // Fire-and-forget SMS to super admins
+      // Fire-and-forget SMS — carries the reference, not the raw id
       notifySuperAdminsBySms({
-        requestId: ins.insertId,
+        reference,
         operation,
         summary,
         requestedEmail: req.admin.email,
@@ -74,7 +79,8 @@ function gated(operation, opts = {}) {
 
       return res.status(202).json({
         queued: true,
-        request_id: ins.insertId,
+        request_id: ins.insertId,   // kept for internal/debug use
+        reference,                  // ← surfaced to the frontend + SMS
         message: 'Request queued for super-admin approval',
       });
     } catch (e) {
@@ -176,7 +182,6 @@ router.delete(
 // ------------------------------------------------------------
 // Estate sub-resources
 // ------------------------------------------------------------
-// Address config — gated (affects all future registrations)
 router.post(
   '/estates/:id/address-config',
   requireRole('super', 'support'),
@@ -195,7 +200,6 @@ router.post(
   ctrl.setAddressConfig
 );
 
-// Charges — gated (financial impact on residents)
 router.post(
   '/estates/:id/charges',
   requireRole('super', 'support'),
@@ -226,12 +230,10 @@ router.delete(
   ctrl.deleteCharge
 );
 
-// Sections / courts / streets — NOT gated (low impact, reversible)
 router.post('/estates/:id/sections', ctrl.addSection);
 router.post('/estates/:id/courts',   ctrl.addCourt);
 router.post('/estates/:id/streets',  ctrl.addStreet);
 
-// First official — gated (assigns a Chairman)
 router.post(
   '/estates/:id/first-official',
   requireRole('super', 'support'),
@@ -250,7 +252,6 @@ router.post(
   ctrl.createFirstOfficial
 );
 
-// Dropdown deletions — NOT gated
 router.delete('/sections/:id', ctrl.deleteSection);
 router.delete('/courts/:id',   ctrl.deleteCourt);
 router.delete('/streets/:id',  ctrl.deleteStreet);
