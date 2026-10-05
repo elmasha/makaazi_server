@@ -7,6 +7,11 @@ function fmt(amount) {
   });
 }
 
+function truncate(str, n) {
+  if (!str) return '';
+  return str.length > n ? str.slice(0, n - 1) + '…' : str;
+}
+
 module.exports = {
   /* ============================================================
    * 1. OFFICIAL ASSIGNED — household becomes an official
@@ -67,23 +72,51 @@ module.exports = {
   },
 
   /* ============================================================
-   * 6. VISITOR ARRIVED — gate verified the pass
+   * 6. VISITOR PASS CREATED — SMS to the VISITOR with check-in link
    * ============================================================ */
-  /* ============================================================
- * 6. VISITOR PASS CREATED — SMS to the VISITOR with check-in link
- * ============================================================ */
-visitorPassCreated: ({ visitorName, hostName, estateName, checkinUrl, validUntil }) => {
-  const until = new Date(validUntil).toLocaleString('en-GB', {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
-  });
-  return `Hi ${visitorName}, ${hostName} has invited you to ${estateName}. Check in when you arrive: ${checkinUrl}. Valid until ${until}. - Makaazi`;
-},
+  visitorPassCreated: ({ visitorName, hostName, estateName, checkinUrl, validUntil }) => {
+    const until = new Date(validUntil).toLocaleString('en-GB', {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    });
+    return `Hi ${visitorName}, ${hostName} has invited you to ${estateName}. Check in when you arrive: ${checkinUrl}. Valid until ${until}. - Makaazi`;
+  },
 
-/* ============================================================
- * 7. VISITOR ARRIVED — SMS to the RESIDENT on check-in
- * ============================================================ */
-visitorArrived: ({ name, visitorName, gateName }) => {
-  const gate = gateName ? ` at the ${gateName}` : '';
-  return `Hi ${name}, your visitor ${visitorName} has been checked in${gate}. - Makaazi`;
-},
+  /* ============================================================
+   * 7. VISITOR ARRIVED — SMS to the RESIDENT on check-in
+   * ============================================================ */
+  visitorArrived: ({ name, visitorName, gateName }) => {
+    const gate = gateName ? ` at the ${gateName}` : '';
+    return `Hi ${name}, your visitor ${visitorName} has been checked in${gate}. - Makaazi`;
+  },
+
+  /* ============================================================
+   * ADMIN APPROVAL — sent to super admins when a support admin
+   * requests a sensitive operation.
+   *
+   * 8.  ESTATE — create / update / delete / config
+   * 9.  ADMIN  — add / change / remove platform admins
+   * 10. BILLING — plans + estate subscriptions
+   * 11. OFFICIAL — officials + service charges
+   * 12. GENERIC — fallback
+   * ============================================================ */
+
+  adminApprovalEstate: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
+    return `Makaazi [Estate ${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  },
+
+  adminApprovalAdmin: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
+    return `Makaazi [Admin ${action}] ⚠️ ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  },
+
+  adminApprovalBilling: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
+    return `Makaazi [Billing ${action}] 💰 ${requesterEmail}: ${truncate(summary, 55)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  },
+
+  adminApprovalOfficial: ({ requesterEmail, action, summary, reviewUrl, requestId }) => {
+    return `Makaazi [${action}] ${requesterEmail}: ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  },
+
+  adminApprovalGeneric: ({ requesterEmail, summary, reviewUrl, requestId }) => {
+    return `Makaazi: ${requesterEmail} requested — ${truncate(summary, 60)}. Approve: ${reviewUrl} (Ref #${requestId}) - Makaazi`;
+  },
 };
