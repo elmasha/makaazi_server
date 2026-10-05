@@ -3,7 +3,7 @@ const db = require('../config/db');
 const { queueSms } = require('./smsService');
 const templates = require('./smsTemplates');
 
-const APP_URL = (process.env.APP_URL || 'https://makaazi.co.ke').replace(/\/+$/, '');
+const APP_URL = (process.env.APP_URL || 'https://makaazi.netlify.app').replace(/\/+$/, '');
 
 /**
  * Map operation → { group, action label }
