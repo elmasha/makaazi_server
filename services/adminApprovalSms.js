@@ -9,6 +9,7 @@ const APP_URL = (process.env.APP_URL || 'https://makaazi.netlify.app').replace(/
  * Map operation → { group, action label }
  *   group   decides which template to use
  *   action  short human word ("create", "delete", "promote"...)
+ * 
  */
 const OPERATION_MAP = {
   // Estate
