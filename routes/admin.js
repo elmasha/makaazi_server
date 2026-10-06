@@ -478,11 +478,13 @@ router.post  ('/visitor-passes/:id/cancel', ctrl.adminCancelVisitorPass);
 router.get   ('/vehicle-access-logs', ctrl.listAllAccessLogs);
 
 
-//Settings
-router.get ('/settings',           requireSuperAdmin, settings.getSettings);
-router.put ('/settings',           requireSuperAdmin, settings.updateSettings);
-router.post('/settings/test-sms',  requireSuperAdmin, settings.testSms);
-router.post('/settings/test-email',requireSuperAdmin, settings.testEmail);
-router.post('/settings/danger',    requireSuperAdmin, settings.dangerAction);
+// ------------------------------------------------------------
+// Platform settings — super admin only
+// ------------------------------------------------------------
+router.get  ('/settings',             requireRole('super'), settingsController.getSettings);
+router.put  ('/settings',             requireRole('super'), settingsController.updateSettings);
+router.post ('/settings/test-sms',    requireRole('super'), settingsController.testSms);
+router.post ('/settings/test-email',  requireRole('super'), settingsController.testEmail);
+router.post ('/settings/danger',      requireRole('super'), settingsController.dangerAction);
 
 module.exports = router;
