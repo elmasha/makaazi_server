@@ -17,7 +17,7 @@ async function queueSms(to, message, meta = {}) {
   const kind = meta.kind || 'generic';
   const hash = crypto
     .createHash('sha1')
-    .update(String(message).slice(0, 80))
+    .update(String(message))
     .digest('hex')
     .slice(0, 12);
   const dedupeKey = `${to}|${kind}|${hash}`;

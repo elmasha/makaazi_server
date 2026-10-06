@@ -6,7 +6,7 @@ const db = require('../config/db');
 const { sendNotification } = require('../utils/notify');
 const { queueSms } = require('../services/smsService');
 const sms = require('../services/smsTemplates');
-const { notifyEstateTreasurer } = require('../services/estateNotifications');   // ← NEW
+const { notifyEstateTreasurer } = require('../services/estateNotifications');
 
 // ============================================================
 // CONFIG
@@ -189,6 +189,7 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
 
 // ============================================================
 // POST /payment/stk_callback — Daraja household callback
+// (atomic — all writes in a single transaction)
 // ============================================================
 router.post('/stk_callback', async (req, res) => {
   console.log('.......... STK Callback ..................');
@@ -204,6 +205,7 @@ router.post('/stk_callback', async (req, res) => {
   const checkoutRequestId = callback.CheckoutRequestID;
   const resultCode = callback.ResultCode;
 
+  // --- Failure branch ---
   if (resultCode !== 0 || !metadata) {
     console.log(`⚠️ STK failed/cancelled: ${resultCode} — ${callback.ResultDesc}`);
     if (checkoutRequestId) {
@@ -218,7 +220,6 @@ router.post('/stk_callback', async (req, res) => {
   const find = (name) => metadata.Item.find((i) => i.Name === name)?.Value;
   const amount = find('Amount');
   const transID = find('MpesaReceiptNumber');
-  const phoneNumber = find('PhoneNumber');
   const transdate = new Date();
 
   if (!transID) {
@@ -226,118 +227,150 @@ router.post('/stk_callback', async (req, res) => {
     return res.status(200).json({ message: 'Acknowledged' });
   }
 
-  const [pendingRows] = await db.promise().query(
-    `SELECT * FROM pending_stk_pushes WHERE checkout_request_id = ? LIMIT 1`,
-    [checkoutRequestId]
-  );
+  // ============================================================
+  //  ATOMIC BLOCK
+  // ============================================================
+  const connection = await db.promise().getConnection();
+  let pending = null;
+  let alreadyRecorded = false;
 
-  if (!pendingRows.length) {
-    console.warn('⚠️ No pending push found for', checkoutRequestId);
-    return res.status(200).json({ message: 'Ignored — no matching pending push' });
+  try {
+    await connection.beginTransaction();
+
+    // Lock pending row so concurrent callbacks serialize
+    const [pendingRows] = await connection.query(
+      `SELECT * FROM pending_stk_pushes
+       WHERE checkout_request_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [checkoutRequestId]
+    );
+
+    if (!pendingRows.length) {
+      await connection.rollback();
+      console.warn('⚠️ No pending push found for', checkoutRequestId);
+      return res.status(200).json({ message: 'Ignored — no matching pending push' });
+    }
+
+    pending = pendingRows[0];
+
+    if (pending.status === 'Completed') {
+      await connection.rollback();
+      console.log('ℹ️ Duplicate callback — pending already completed:', transID);
+      return res.status(200).json({ message: 'Already recorded' });
+    }
+
+    const [dupe] = await connection.query(
+      `SELECT payment_id FROM payments WHERE transaction_id = ? LIMIT 1`,
+      [transID]
+    );
+
+    if (dupe.length) {
+      await connection.query(
+        `UPDATE pending_stk_pushes SET status = 'Completed' WHERE id = ?`,
+        [pending.id]
+      );
+      await connection.commit();
+      alreadyRecorded = true;
+      console.log('ℹ️ Duplicate callback — already recorded:', transID);
+    } else {
+      await connection.query(
+        `INSERT INTO payments
+           (household_id, charge_id, payment_date, amount_paid,
+            payment_method, transaction_id, receipt_url, payment_status, estate_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          pending.household_id,
+          pending.charge_id,
+          transdate,
+          amount || pending.amount,
+          'Mpesa',
+          transID,
+          null,
+          'Completed',
+          pending.estate_id,
+        ]
+      );
+
+      await connection.query(
+        `UPDATE pending_stk_pushes SET status = 'Completed' WHERE id = ?`,
+        [pending.id]
+      );
+
+      const monthNames = ['january','february','march','april','may','june',
+                          'july','august','september','october','november','december'];
+      const now = new Date();
+      const monthKey = monthNames[now.getMonth()];
+      const yearVal = now.getFullYear();
+
+      let [hpRows] = await connection.query(
+        `SELECT * FROM household_payments
+         WHERE household_id = ? AND year = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [pending.household_id, yearVal]
+      );
+
+      if (!hpRows.length) {
+        await connection.query(
+          `INSERT INTO household_payments
+             (household_id, estate_id, full_name, section, street, court,
+              year, balance_brought_forward, uid)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          [
+            pending.household_id,
+            pending.estate_id,
+            pending.user_name || '',
+            '', '', '',
+            yearVal,
+            pending.uid || null,
+          ]
+        );
+        [hpRows] = await connection.query(
+          `SELECT * FROM household_payments
+           WHERE household_id = ? AND year = ?
+           LIMIT 1`,
+          [pending.household_id, yearVal]
+        );
+      }
+
+      if (hpRows.length) {
+        const row = hpRows[0];
+        const paidAmount = Number(amount || pending.amount);
+        const currentMonth = Number(row[monthKey] || 0);
+        const newMonthVal = currentMonth + paidAmount;
+        const newTotal = Number(row.total_paid || 0) + paidAmount;
+        const monthsEq = pending.amount > 0
+          ? Number((newTotal / Number(pending.amount || 1)).toFixed(2))
+          : 0;
+
+        await connection.query(
+          `UPDATE household_payments
+           SET ${monthKey} = ?, total_paid = ?, months_equivalent = ?
+           WHERE id = ?`,
+          [newMonthVal, newTotal, monthsEq, row.id]
+        );
+      }
+
+      await connection.commit();
+      console.log('✅ Payment committed atomically for household', pending.household_id);
+    }
+  } catch (err) {
+    try { await connection.rollback(); } catch {}
+    console.error('❌ STK callback transaction failed:', err.message);
+    return res.status(200).json({ message: 'Acknowledged' });
+  } finally {
+    connection.release();
   }
 
-  const pending = pendingRows[0];
-
-  const [dupe] = await db.promise().query(
-    `SELECT payment_id FROM payments WHERE transaction_id = ? LIMIT 1`,
-    [transID]
-  );
-  if (dupe.length) {
-    console.log('ℹ️ Duplicate callback — already recorded:', transID);
-    await db.promise().query(
-      `UPDATE pending_stk_pushes SET status = 'Completed' WHERE id = ?`,
-      [pending.id]
-    );
+  if (alreadyRecorded) {
     return res.status(200).json({ message: 'Already recorded' });
   }
 
-  try {
-    await db.promise().query(
-      `INSERT INTO payments
-         (household_id, charge_id, payment_date, amount_paid,
-          payment_method, transaction_id, receipt_url, payment_status, estate_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        pending.household_id,
-        pending.charge_id,
-        transdate,
-        amount || pending.amount,
-        'Mpesa',
-        transID,
-        null,
-        'Completed',
-        pending.estate_id,
-      ]
-    );
-    console.log('✅ Payment saved for household', pending.household_id);
+  // ============================================================
+  //  NOTIFICATIONS & SMS — outside the transaction, fire-and-forget
+  // ============================================================
 
-    await db.promise().query(
-      `UPDATE pending_stk_pushes SET status = 'Completed' WHERE id = ?`,
-      [pending.id]
-    );
-  } catch (err) {
-    console.error('❌ Insert payment error:', err.message);
-    return res.status(200).json({ message: 'Acknowledged' });
-  }
-
-  // ---- Update household_payments month column + totals ----
-  try {
-    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
-                        'july', 'august', 'september', 'october', 'november', 'december'];
-    const now = new Date();
-    const monthKey = monthNames[now.getMonth()];
-    const yearVal = now.getFullYear();
-
-    let [hpRows] = await db.promise().query(
-      `SELECT * FROM household_payments
-       WHERE household_id = ? AND year = ? LIMIT 1`,
-      [pending.household_id, yearVal]
-    );
-
-    if (!hpRows.length) {
-      await db.promise().query(
-        `INSERT INTO household_payments
-           (household_id, estate_id, full_name, section, street, court,
-            year, balance_brought_forward, uid)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        [
-          pending.household_id,
-          pending.estate_id,
-          pending.user_name || '',
-          '', '', '',
-          yearVal,
-          pending.uid || null,
-        ]
-      );
-      [hpRows] = await db.promise().query(
-        `SELECT * FROM household_payments
-         WHERE household_id = ? AND year = ? LIMIT 1`,
-        [pending.household_id, yearVal]
-      );
-    }
-
-    if (hpRows.length) {
-      const row = hpRows[0];
-      const currentMonth = Number(row[monthKey] || 0);
-      const newMonthVal = currentMonth + Number(amount || pending.amount);
-      const newTotal = Number(row.total_paid || 0) + Number(amount || pending.amount);
-      const monthsEq = pending.amount > 0
-        ? Number((newTotal / Number(pending.amount || 1)).toFixed(2))
-        : 0;
-
-      await db.promise().query(
-        `UPDATE household_payments
-         SET ${monthKey} = ?, total_paid = ?, months_equivalent = ?
-         WHERE id = ?`,
-        [newMonthVal, newTotal, monthsEq, row.id]
-      );
-      console.log('✅ household_payments updated');
-    }
-  } catch (err) {
-    console.error('⚠️ household_payments update failed:', err.message);
-  }
-
-  // ---- In-app notification to resident ----
   try {
     await sendNotification({
       user_uid: pending.uid || String(pending.household_id),
@@ -350,7 +383,7 @@ router.post('/stk_callback', async (req, res) => {
     console.warn('⚠️ Notification failed:', err.message);
   }
 
-  // ---- SMS: payment receipt to resident (fire-and-forget) ----
+  // ---- SMS: receipt to resident ----
   (async () => {
     try {
       const [[hh]] = await db.promise().query(
@@ -400,7 +433,7 @@ router.post('/stk_callback', async (req, res) => {
     }
   })();
 
-  // ---- SMS: notify the estate treasurer (fire-and-forget) ----
+  // ---- SMS: treasurer ----
   (async () => {
     try {
       const [[hh]] = await db.promise().query(

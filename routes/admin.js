@@ -8,6 +8,9 @@ const db = require('../config/db');
 const { notifySuperAdminsBySms } = require('../services/adminApprovalSms');
 const adminApprovalsRouter = require('../routes/adminApprovals');
 const { generateReference } = require('../utils/generateReference');   // ← NEW
+const settingsController = require('../controllers/settingsController');
+
+
 
 // ============================================================
 // Helpers
@@ -473,5 +476,11 @@ router.post  ('/visitor-passes/:id/cancel', ctrl.adminCancelVisitorPass);
 // Access logs — NOT gated
 // ------------------------------------------------------------
 router.get   ('/vehicle-access-logs', ctrl.listAllAccessLogs);
+
+
+//Settings
+router.get('/settings', settingsController.getSettings);
+router.post('/settings', settingsController.updateSettings);
+router.post('/settings/test-sms', settingsController.testSms);
 
 module.exports = router;

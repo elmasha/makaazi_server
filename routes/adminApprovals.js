@@ -5,7 +5,7 @@ const db      = require('../config/db');
 const redisClient = require('../config/redis');
 const adminAuth = require('../middleware/adminAuth');
 const { requireSuperAdmin } = adminAuth;
-const { notifyRequesterBySms } = require('../services/adminApprovalSms');   // ← NEW
+const { notifyRequesterBySms } = require('../services/adminApprovalSms');
 
 /* =============================================================
    Helpers
@@ -120,9 +120,14 @@ async function applyApproval(conn, approval, payload) {
   /* ---------- ADMIN ACCESS ---------- */
   if (op === 'admin.create') {
     const [ins] = await conn.query(
-      `INSERT INTO intec_admins (email, full_name, role, active)
-       VALUES (?, ?, ?, 1)`,
-      [payload.email, payload.full_name || null, payload.role || 'support']
+      `INSERT INTO intec_admins (email, full_name, phone_number, role, active)
+       VALUES (?, ?, ?, ?, 1)`,
+      [
+        payload.email,
+        payload.full_name || null,
+        payload.phone_number || null,
+        payload.role || 'support',
+      ]
     );
     return ins.insertId;
   }
@@ -343,11 +348,6 @@ async function invalidateCacheFor(op, targetId) {
    ROUTES (super-admin only)
    ============================================================= */
 
-/**
- * GET /api/admin/approvals
- * Query: ?status=Pending|Approved|Rejected  (omit or pass 'all' for everything)
- *        ?operation=estate.create            (optional)
- */
 router.get('/', adminAuth, requireSuperAdmin, async (req, res) => {
   const status    = req.query.status;
   const operation = req.query.operation;
@@ -384,10 +384,6 @@ router.get('/', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-/**
- * GET /api/admin/approvals/count
- * Badge count — pending only.
- */
 router.get('/count', adminAuth, requireSuperAdmin, async (req, res) => {
   try {
     const [[row]] = await db.promise().query(
@@ -402,10 +398,6 @@ router.get('/count', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-/**
- * GET /api/admin/approvals/:key
- * Accepts either the numeric id (42) or the reference code (APV-A7K2M9).
- */
 router.get('/:key', adminAuth, requireSuperAdmin, async (req, res) => {
   const key = req.params.key;
   const isNumeric = /^\d+$/.test(key);
@@ -430,10 +422,6 @@ router.get('/:key', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-/**
- * POST /api/admin/approvals/:id/approve
- * Uses the numeric id — the reference is only for display.
- */
 router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
   const id = Number(req.params.id);
 
@@ -489,7 +477,6 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
       }
     );
 
-    // ── In-app notification to requester ──
     try {
       const [[requester]] = await db.promise().query(
         `SELECT firebase_uid FROM intec_admins WHERE id = ? LIMIT 1`,
@@ -506,7 +493,6 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
       console.warn('notify requester failed:', e.message);
     }
 
-    // ── SMS back to requester (fire-and-forget) ──
     notifyRequesterBySms({
       requestedBy:   approval.requested_by,
       reference:     approval.reference,
@@ -530,9 +516,6 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-/**
- * POST /api/admin/approvals/:id/reject
- */
 router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const { reason } = req.body || {};
@@ -569,7 +552,6 @@ router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
       }
     );
 
-    // ── In-app notification to requester ──
     try {
       const [[requester]] = await db.promise().query(
         `SELECT firebase_uid FROM intec_admins WHERE id = ? LIMIT 1`,
@@ -589,7 +571,6 @@ router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
       console.warn('notify requester failed:', e.message);
     }
 
-    // ── SMS back to requester (fire-and-forget) ──
     notifyRequesterBySms({
       requestedBy:   approval.requested_by,
       reference:     approval.reference,
