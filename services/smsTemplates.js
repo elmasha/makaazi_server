@@ -118,4 +118,14 @@ module.exports = {
   adminApprovalGeneric: ({ requesterEmail, summary, reviewUrl, reference }) => {
     return `Makaazi: ${requesterEmail} requested — ${truncate(summary, 60)}. Approve: ${reviewUrl} (${reference}) - Makaazi`;
   },
+
+  /* ============================================================
+   * 5b. PAYMENT RECEIVED — SMS to the estate treasurer
+   * ============================================================ */
+  paymentReceivedTreasurer: ({ ownerName, amount, chargeType, period, receipt, estateName }) => {
+    const chargeLine = chargeType ? ` for ${chargeType}` : '';
+    const periodLine = period ? ` (${period})` : '';
+    return `Makaazi: Payment received at ${estateName || 'your estate'}. ${ownerName} paid KES ${fmt(amount)}${chargeLine}${periodLine}. Receipt: ${receipt || '—'}. - Makaazi`;
+  },
+
 };

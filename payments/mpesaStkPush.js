@@ -6,6 +6,7 @@ const db = require('../config/db');
 const { sendNotification } = require('../utils/notify');
 const { queueSms } = require('../services/smsService');
 const sms = require('../services/smsTemplates');
+const { notifyEstateTreasurer } = require('../services/estateNotifications');   // ← NEW
 
 // ============================================================
 // CONFIG
@@ -36,10 +37,6 @@ function normalizePhone(raw) {
   return phone;
 }
 
-/**
- * Promisified request — keeps the "request" package but gives us async/await.
- * Returns: { statusCode, body } where body is parsed if JSON.
- */
 function httpRequest(options) {
   return new Promise((resolve, reject) => {
     request(options, (error, response, body) => {
@@ -53,7 +50,6 @@ function httpRequest(options) {
   });
 }
 
-// Convenience wrappers
 function httpGet(url, headers = {}) {
   return httpRequest({ url, method: 'GET', headers, json: true });
 }
@@ -113,7 +109,6 @@ router.post('/mpesa_stk_push', access, async (req, res) => {
     year,
   } = req.body;
 
-  // Validate
   const missing = [];
   if (!phone) missing.push('phone');
   if (!amount) missing.push('amount');
@@ -285,7 +280,7 @@ router.post('/stk_callback', async (req, res) => {
     return res.status(200).json({ message: 'Acknowledged' });
   }
 
-  // Update household_payments month column + totals
+  // ---- Update household_payments month column + totals ----
   try {
     const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
                         'july', 'august', 'september', 'october', 'november', 'december'];
@@ -342,7 +337,7 @@ router.post('/stk_callback', async (req, res) => {
     console.error('⚠️ household_payments update failed:', err.message);
   }
 
-  // ---- In-app notification ----
+  // ---- In-app notification to resident ----
   try {
     await sendNotification({
       user_uid: pending.uid || String(pending.household_id),
@@ -402,6 +397,44 @@ router.post('/stk_callback', async (req, res) => {
       }
     } catch (e) {
       console.warn('Payment SMS failed:', e.message);
+    }
+  })();
+
+  // ---- SMS: notify the estate treasurer (fire-and-forget) ----
+  (async () => {
+    try {
+      const [[hh]] = await db.promise().query(
+        `SELECT primary_owner FROM households WHERE household_id = ?`,
+        [pending.household_id]
+      );
+      const [[est]] = await db.promise().query(
+        `SELECT estate_name FROM estates WHERE estate_id = ?`,
+        [pending.estate_id]
+      );
+      const [[chg]] = pending.charge_id
+        ? await db.promise().query(
+            `SELECT charge_type FROM service_charges WHERE charges_id = ? LIMIT 1`,
+            [pending.charge_id]
+          )
+        : [[]];
+
+      const period =
+        pending.month && pending.year
+          ? `${pending.month} ${pending.year}`
+          : null;
+
+      const result = await notifyEstateTreasurer({
+        estateId:   pending.estate_id,
+        ownerName:  hh?.primary_owner || pending.user_name || 'A resident',
+        amount:     amount || pending.amount,
+        chargeType: chg?.charge_type || pending.transaction_type || null,
+        period,
+        receipt:    transID,
+        estateName: est?.estate_name || null,
+      });
+      console.log('🟡 treasurerPayment →', result);
+    } catch (e) {
+      console.warn('Treasurer SMS failed:', e.message);
     }
   })();
 
