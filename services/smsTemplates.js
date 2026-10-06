@@ -30,12 +30,10 @@ function signoff() {
 // DB template loader + token renderer
 // ============================================================
 
-// Map each "editable in settings" template to a DB key and a
-// list of tokens the UI documents. Anything not listed here
-// uses the hardcoded builder below, unchanged.
+// Keys now match the frontend Settings page exactly.
 const DB_TEMPLATE_KEYS = {
-  householdApproved:   'sms.tpl_household_approved',
-  paymentSuccessful:   'sms.tpl_payment_confirmation',
+  householdApproved: 'sms_template_approval',
+  paymentSuccessful: 'sms_template_payment',
 };
 
 const CACHE_TTL_MS = 60_000;
@@ -99,7 +97,7 @@ async function tryDbTemplate(kind, vars) {
 }
 
 // ============================================================
-// Public API — every function stays async now
+// Public API — every function stays async
 // ============================================================
 
 module.exports = {
@@ -125,9 +123,10 @@ module.exports = {
     return `Hi ${name}, we have received your registration request${addrLine} at ${estateName}. An estate official will review and approve it shortly. ${signoff()}`;
   },
 
-  /* 4. HOUSEHOLD APPROVED — DB-overridable */
+  /* 4. HOUSEHOLD APPROVED — DB-overridable
+     Available tokens in the settings UI:
+       {{name}} {{estate}} {{account}} {{phone}}            */
   householdApproved: async ({ name, estateName, urn, takeOnBalance, phone }) => {
-    // Try DB template first
     const dbBody = await tryDbTemplate('householdApproved', {
       name,
       estate:  estateName,
@@ -144,13 +143,27 @@ module.exports = {
     return `Hi ${name}, your registration at ${estateName} has been approved. Your account number is ${urn}.${balLine} Welcome to Makaazi! ${signoff()}`;
   },
 
-  /* 5. PAYMENT SUCCESSFUL — DB-overridable */
+  /* 5. PAYMENT SUCCESSFUL — DB-overridable
+     Available tokens in the settings UI:
+       {{name}} {{amount}} {{estate}} {{receipt}} {{balance_line}}
+
+     balance_line is pre-rendered by this module so the admin can
+     drop it anywhere in the template, or omit it entirely.        */
   paymentSuccessful: async ({ name, amount, receipt, estateName, balance }) => {
+    // Pre-render the balance sentence as a single token
+    let balanceLine = '';
+    if (balance != null) {
+      balanceLine = Number(balance) > 0
+        ? `Outstanding: KES ${fmt(balance)}.`
+        : `You are fully paid up. Asante!`;
+    }
+
     const dbBody = await tryDbTemplate('paymentSuccessful', {
       name,
-      amount: fmt(amount),
-      estate: estateName,
+      amount:       fmt(amount),
+      estate:       estateName,
       receipt,
+      balance_line: balanceLine,
     });
     if (dbBody) return dbBody;
 
@@ -160,13 +173,7 @@ module.exports = {
       `we have received your payment of KES ${fmt(amount)} for ${estateName || 'your estate'}.`,
       `Receipt: ${receipt || '—'}.`,
     ];
-    if (balance != null) {
-      parts.push(
-        Number(balance) > 0
-          ? `Outstanding: KES ${fmt(balance)}.`
-          : `You are fully paid up. Asante!`
-      );
-    }
+    if (balanceLine) parts.push(balanceLine);
     parts.push(signoff());
     return parts.join(' ');
   },

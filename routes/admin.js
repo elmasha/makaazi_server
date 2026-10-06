@@ -479,8 +479,10 @@ router.get   ('/vehicle-access-logs', ctrl.listAllAccessLogs);
 
 
 //Settings
-router.get('/settings', settingsController.getSettings);
-router.post('/settings', settingsController.updateSettings);
-router.post('/settings/test-sms', settingsController.testSms);
+router.get ('/settings',           requireSuperAdmin, settings.getSettings);
+router.put ('/settings',           requireSuperAdmin, settings.updateSettings);
+router.post('/settings/test-sms',  requireSuperAdmin, settings.testSms);
+router.post('/settings/test-email',requireSuperAdmin, settings.testEmail);
+router.post('/settings/danger',    requireSuperAdmin, settings.dangerAction);
 
 module.exports = router;

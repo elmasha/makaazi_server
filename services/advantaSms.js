@@ -9,38 +9,37 @@ const CACHE_TTL_MS = 60_000;
 let _cache = null;
 let _cacheAt = 0;
 
+
+// services/advantaSms.js — loadSmsConfig()
 async function loadSmsConfig() {
   if (_cache && Date.now() - _cacheAt < CACHE_TTL_MS) return _cache;
 
   const cfg = {
-    apiKey:    process.env.ADVANTA_API_KEY     || '',
-    partnerId: process.env.ADVANTA_PARTNER_ID  || '',
-    shortcode: process.env.ADVANTA_SHORTCODE   || 'INTEC',
-    baseUrl:   process.env.ADVANTA_BASE        || 'https://quicksms.advantasms.com',
+    apiKey:    process.env.ADVANTA_API_KEY    || '',
+    partnerId: process.env.ADVANTA_PARTNER_ID || '',
+    shortcode: process.env.ADVANTA_SHORTCODE  || 'INTEC',
+    baseUrl:   process.env.ADVANTA_BASE       || 'https://quicksms.advantasms.com',
   };
 
   try {
     const [rows] = await db.promise().query(
       `SELECT setting_key, setting_value FROM platform_settings
        WHERE setting_key IN
-         ('sms.api_key','sms.partner_id','sms.sender_id','sms.base_url')`
+         ('sms_api_key','sms_partner_id','sms_sender_id','sms_api_base')`
     );
     const map = {};
     for (const r of rows) map[r.setting_key] = r.setting_value;
 
-    // DB value wins only if it's non-empty
-    if (map['sms.api_key'])    cfg.apiKey    = map['sms.api_key'];
-    if (map['sms.partner_id']) cfg.partnerId = map['sms.partner_id'];
-    if (map['sms.sender_id'])  cfg.shortcode = map['sms.sender_id'];
-    if (map['sms.base_url'])   cfg.baseUrl   = map['sms.base_url'];
+    // ── these key names now match the frontend exactly ──
+    if (map['sms_api_key'])    cfg.apiKey    = map['sms_api_key'];
+    if (map['sms_partner_id']) cfg.partnerId = map['sms_partner_id'];
+    if (map['sms_sender_id'])  cfg.shortcode = map['sms_sender_id'];
+    if (map['sms_api_base'])   cfg.baseUrl   = map['sms_api_base'];
   } catch (e) {
-    // Table might not exist yet (pre-migration) — silently fall back to env
     console.warn('advantaSms: could not load settings from DB:', e.message);
   }
 
-  // Strip trailing slash so we can safely append /api/...
   cfg.baseUrl = cfg.baseUrl.replace(/\/+$/, '');
-
   _cache = cfg;
   _cacheAt = Date.now();
   return cfg;
