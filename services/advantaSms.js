@@ -9,8 +9,6 @@ const CACHE_TTL_MS = 60_000;
 let _cache = null;
 let _cacheAt = 0;
 
-
-// services/advantaSms.js — loadSmsConfig()
 async function loadSmsConfig() {
   if (_cache && Date.now() - _cacheAt < CACHE_TTL_MS) return _cache;
 
@@ -30,7 +28,6 @@ async function loadSmsConfig() {
     const map = {};
     for (const r of rows) map[r.setting_key] = r.setting_value;
 
-    // ── these key names now match the frontend exactly ──
     if (map['sms_api_key'])    cfg.apiKey    = map['sms_api_key'];
     if (map['sms_partner_id']) cfg.partnerId = map['sms_partner_id'];
     if (map['sms_sender_id'])  cfg.shortcode = map['sms_sender_id'];
@@ -40,6 +37,7 @@ async function loadSmsConfig() {
   }
 
   cfg.baseUrl = cfg.baseUrl.replace(/\/+$/, '');
+
   _cache = cfg;
   _cacheAt = Date.now();
   return cfg;
@@ -64,7 +62,7 @@ async function getSmsConfig() {
 }
 
 // ============================================================
-// Phone normaliser (unchanged behaviour)
+// Phone normaliser
 // ============================================================
 function normalizePhone(mobile) {
   if (!mobile) return null;
@@ -79,6 +77,15 @@ function normalizePhone(mobile) {
 // Send a single SMS
 // ============================================================
 async function sendSms(mobile, message) {
+  // Guard: reject Promise-by-mistake so we never send "[object Promise]"
+  if (message && typeof message.then === 'function') {
+    console.error('sendSms: received a Promise instead of a string. Add await at the call site.');
+    return { ok: false, error: 'SMS body was a Promise — missing await' };
+  }
+  if (typeof message !== 'string') {
+    message = String(message ?? '');
+  }
+
   const cfg = await loadSmsConfig();
 
   if (!cfg.apiKey || !cfg.partnerId || !cfg.shortcode) {
@@ -95,7 +102,7 @@ async function sendSms(mobile, message) {
     partnerID: cfg.partnerId,
     shortcode: cfg.shortcode,
     mobile:    msisdn,
-    message:   String(message || '').slice(0, 480), // ≤3 SMS segments
+    message:   message.slice(0, 480),
   };
 
   try {
@@ -118,8 +125,6 @@ async function sendSms(mobile, message) {
       return { ok: false, error: `HTTP ${r.status}: ${errText}` };
     }
 
-    // Advanta replies:
-    // { responses: [{ "respose-code": 200, "response-description": "Success", "messageid": "..." }] }
     const first = data?.responses?.[0];
     const code  = first?.['respose-code'] ?? first?.['response-code'] ?? first?.code;
     const ok    = code === 200 || code === '200' || data?.success === true;

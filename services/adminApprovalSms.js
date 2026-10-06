@@ -37,6 +37,22 @@ const OPERATION_MAP = {
   'charge.delete':         { group: 'official', action: 'Drop charge' },
 };
 
+/**
+ * Guard: ensure a template call returned a string, not a Promise.
+ * smsTemplates must stay synchronous — if someone makes it async
+ * again, we want a loud failure, not an "[object Promise]" SMS.
+ */
+function ensureString(result, label) {
+  if (result && typeof result.then === 'function') {
+    console.error(
+      `[adminApprovalSms] templates.${label} returned a Promise. ` +
+      `smsTemplates must stay synchronous.`
+    );
+    return '[template error — check server logs]';
+  }
+  return String(result ?? '');
+}
+
 function buildMessage({ operation, requesterEmail, summary, reviewUrl, reference }) {
   const meta = OPERATION_MAP[operation] || { group: 'generic', action: 'request' };
 
@@ -48,13 +64,26 @@ function buildMessage({ operation, requesterEmail, summary, reviewUrl, reference
     reference,
   };
 
+  let result;
   switch (meta.group) {
-    case 'estate':   return templates.adminApprovalEstate(base);
-    case 'admin':    return templates.adminApprovalAdmin(base);
-    case 'billing':  return templates.adminApprovalBilling(base);
-    case 'official': return templates.adminApprovalOfficial(base);
-    default:         return templates.adminApprovalGeneric(base);
+    case 'estate':
+      result = ensureString(templates.adminApprovalEstate(base), 'adminApprovalEstate');
+      break;
+    case 'admin':
+      result = ensureString(templates.adminApprovalAdmin(base), 'adminApprovalAdmin');
+      break;
+    case 'billing':
+      result = ensureString(templates.adminApprovalBilling(base), 'adminApprovalBilling');
+      break;
+    case 'official':
+      result = ensureString(templates.adminApprovalOfficial(base), 'adminApprovalOfficial');
+      break;
+    default:
+      result = ensureString(templates.adminApprovalGeneric(base), 'adminApprovalGeneric');
+      break;
   }
+
+  return result;
 }
 
 /**
@@ -167,18 +196,15 @@ async function notifyRequesterBySms({
   // 2) Build the message
   let message;
   if (status === 'Approved') {
-    message = templates.adminApprovalApproved({
-      reference,
-      summary,
-      reviewerEmail,
-    });
+    message = ensureString(
+      templates.adminApprovalApproved({ reference, summary, reviewerEmail }),
+      'adminApprovalApproved'
+    );
   } else if (status === 'Rejected') {
-    message = templates.adminApprovalRejected({
-      reference,
-      summary,
-      reviewerEmail,
-      reason,
-    });
+    message = ensureString(
+      templates.adminApprovalRejected({ reference, summary, reviewerEmail, reason }),
+      'adminApprovalRejected'
+    );
   } else {
     return null;
   }
@@ -201,6 +227,6 @@ async function notifyRequesterBySms({
 
 module.exports = {
   notifySuperAdminsBySms,
-  notifyRequesterBySms,   // ← NEW
+  notifyRequesterBySms,
   OPERATION_MAP,
 };
