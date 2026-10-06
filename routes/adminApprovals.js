@@ -5,6 +5,7 @@ const db      = require('../config/db');
 const redisClient = require('../config/redis');
 const adminAuth = require('../middleware/adminAuth');
 const { requireSuperAdmin } = adminAuth;
+const { notifyRequesterBySms } = require('../services/adminApprovalSms');   // ← NEW
 
 /* =============================================================
    Helpers
@@ -488,6 +489,7 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
       }
     );
 
+    // ── In-app notification to requester ──
     try {
       const [[requester]] = await db.promise().query(
         `SELECT firebase_uid FROM intec_admins WHERE id = ? LIMIT 1`,
@@ -503,6 +505,15 @@ router.post('/:id/approve', adminAuth, requireSuperAdmin, async (req, res) => {
     } catch (e) {
       console.warn('notify requester failed:', e.message);
     }
+
+    // ── SMS back to requester (fire-and-forget) ──
+    notifyRequesterBySms({
+      requestedBy:   approval.requested_by,
+      reference:     approval.reference,
+      status:        'Approved',
+      summary:       approval.summary,
+      reviewerEmail: req.admin.email,
+    }).catch((e) => console.warn('approve requester SMS failed:', e.message));
 
     return res.json({
       ok: true,
@@ -558,6 +569,7 @@ router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
       }
     );
 
+    // ── In-app notification to requester ──
     try {
       const [[requester]] = await db.promise().query(
         `SELECT firebase_uid FROM intec_admins WHERE id = ? LIMIT 1`,
@@ -576,6 +588,16 @@ router.post('/:id/reject', adminAuth, requireSuperAdmin, async (req, res) => {
     } catch (e) {
       console.warn('notify requester failed:', e.message);
     }
+
+    // ── SMS back to requester (fire-and-forget) ──
+    notifyRequesterBySms({
+      requestedBy:   approval.requested_by,
+      reference:     approval.reference,
+      status:        'Rejected',
+      summary:       approval.summary,
+      reviewerEmail: req.admin.email,
+      reason:        reason || null,
+    }).catch((e) => console.warn('reject requester SMS failed:', e.message));
 
     return res.json({ ok: true });
   } catch (err) {

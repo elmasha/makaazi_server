@@ -120,4 +120,87 @@ async function notifySuperAdminsBySms({ reference, operation, summary, requested
   return results;
 }
 
-module.exports = { notifySuperAdminsBySms, OPERATION_MAP };
+/**
+ * Notify the admin who submitted a request that it was approved or rejected.
+ * Looks up their phone from intec_admins.phone_number. Never throws.
+ *
+ * @param {Object} args
+ * @param {number} args.requestedBy      admin id (admin_approval_requests.requested_by)
+ * @param {string} args.reference        e.g. "APV-A7K2M9"
+ * @param {string} args.status           'Approved' | 'Rejected'
+ * @param {string} args.summary          original request summary
+ * @param {string} args.reviewerEmail    who approved/rejected
+ * @param {string} [args.reason]         rejection reason (only for Rejected)
+ */
+async function notifyRequesterBySms({
+  requestedBy,
+  reference,
+  status,
+  summary,
+  reviewerEmail,
+  reason = null,
+}) {
+  if (!requestedBy || !reference || !status) return null;
+
+  // 1) Look up the requester's phone
+  let requester = null;
+  try {
+    const [[row]] = await db.promise().query(
+      `SELECT id, full_name, email, phone_number
+       FROM intec_admins
+       WHERE id = ? LIMIT 1`,
+      [requestedBy]
+    );
+    requester = row;
+  } catch (e) {
+    console.warn('notifyRequesterBySms: lookup failed:', e.message);
+    return null;
+  }
+
+  if (!requester?.phone_number) {
+    console.warn(
+      `notifyRequesterBySms: admin #${requestedBy} has no phone_number on file`
+    );
+    return null;
+  }
+
+  // 2) Build the message
+  let message;
+  if (status === 'Approved') {
+    message = templates.adminApprovalApproved({
+      reference,
+      summary,
+      reviewerEmail,
+    });
+  } else if (status === 'Rejected') {
+    message = templates.adminApprovalRejected({
+      reference,
+      summary,
+      reviewerEmail,
+      reason,
+    });
+  } else {
+    return null;
+  }
+
+  // 3) Send
+  try {
+    const out = await queueSms(requester.phone_number, message, {
+      kind: status === 'Approved'
+        ? 'admin_approval_approved'
+        : 'admin_approval_rejected',
+      user_uid: null,
+      estate_id: null,
+    });
+    return { phone: requester.phone_number, ...out };
+  } catch (e) {
+    console.warn('notifyRequesterBySms: send failed:', e.message);
+    return { phone: requester.phone_number, ok: false, error: e.message };
+  }
+}
+
+module.exports = {
+  notifySuperAdminsBySms,
+  notifyRequesterBySms,   // ← NEW
+  OPERATION_MAP,
+};

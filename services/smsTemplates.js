@@ -120,6 +120,8 @@ module.exports = {
   /* ============================================================
    * ADMIN APPROVAL — reference is a short code like "APV-A7K2M9"
    *
+   * Sent to super admins when a support admin requests an action.
+   *
    * 8.  ESTATE
    * 9.  ADMIN
    * 10. BILLING
@@ -145,5 +147,22 @@ module.exports = {
 
   adminApprovalGeneric: ({ requesterEmail, summary, reviewUrl, reference }) => {
     return `Makaazi: ${requesterEmail} requested — ${truncate(summary, 55)}. Approve: ${reviewUrl} (${reference}) ${signoff()}`;
+  },
+
+  /* ============================================================
+   * ADMIN APPROVAL OUTCOME — sent back to the requesting admin
+   * once their queued request has been approved or rejected.
+   *
+   * 13. APPROVED
+   * 14. REJECTED
+   * ============================================================ */
+
+  adminApprovalApproved: ({ reference, summary, reviewerEmail }) => {
+    return `Makaazi: Your request ${reference} was approved ✓ — ${truncate(summary, 50)}. By ${reviewerEmail || 'super admin'}. ${signoff()}`;
+  },
+
+  adminApprovalRejected: ({ reference, summary, reviewerEmail, reason }) => {
+    const reasonLine = reason ? ` Reason: ${truncate(reason, 60)}.` : '';
+    return `Makaazi: Your request ${reference} was rejected ✗ — ${truncate(summary, 40)}.${reasonLine} By ${reviewerEmail || 'super admin'}. ${signoff()}`;
   },
 };
