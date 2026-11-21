@@ -3,7 +3,7 @@ const redisClient = require('../config/redis');
 
 const DEFAULT_EXPIRATION = 60;
 
-// Make Payment
+// Make Payment (Manual)
 exports.makePayment = (req, res) => {
     const { household_id, amount_paid, payment_method, transaction_id } = req.body;
     const sql = 'INSERT INTO payments (household_id, amount_paid, payment_method, transaction_id) VALUES (?, ?, ?, ?)';
@@ -12,8 +12,6 @@ exports.makePayment = (req, res) => {
         res.json({ message: 'Payment successful', paymentId: result.insertId });
     });
 };
-
-
 
 ////.........Get households by ID........////
 exports.getPaymentById = (req, res) => {
@@ -28,7 +26,6 @@ exports.getPaymentById = (req, res) => {
     });
 };
 
-
 ////.........Get Estate by ID........////
 exports.getPaymentByEstateId = (req, res) => {
     const estateId = req.params.id;
@@ -42,7 +39,6 @@ exports.getPaymentByEstateId = (req, res) => {
     });
 };
 
-
 // Get All Payments
 exports.getAllPayments = (req, res) => {
     const sql = 'SELECT * FROM payments ORDER BY created_at DESC';
@@ -51,7 +47,6 @@ exports.getAllPayments = (req, res) => {
         res.json(results);
     });
 };
-
 
 ///-----Query Estate ---////
 exports.getEstateQueryPayments= async (req, res) => {
@@ -77,7 +72,6 @@ exports.getEstateQueryPayments= async (req, res) => {
     });
 };
 
-
 ///-----Query Households ---////
 exports.getUserQueryPayments= async (req, res) => {
     const household_id = req.params.id;
@@ -97,15 +91,11 @@ exports.getUserQueryPayments= async (req, res) => {
 
     db.query(sql, [household_id], (err, results) => {
         if (err) {
-        
             return res.status(500).json({ error: 'Database error' });;
         }
        return res.status(200).json(results);
     });
 };
-
-
-
 
 // Search households by estate ID and keyword
 exports.searchHouseholdsId = async (req, res) => {
@@ -119,14 +109,11 @@ exports.searchHouseholdsId = async (req, res) => {
     const cacheKey = `payments/:${household_id}/:${query}`;
 
     try {
-        // Check Redis cache for the search results
         const cachedResults = await redisClient.get(cacheKey);
         if (cachedResults) {
-            console.log('🔁 Serving search results from cache');
             return res.status(200).json(JSON.parse(cachedResults));
         }
 
-        // SQL query to search within the specified estate ID
         const sql = `
             SELECT * FROM payments 
             WHERE household_id = ? AND (
@@ -139,7 +126,6 @@ exports.searchHouseholdsId = async (req, res) => {
 
         db.query(sql, [household_id, searchPattern, searchPattern, searchPattern], async (err, results) => {
             if (err) {
-                console.error('Database error: ' + err.message);
                 return res.status(500).json({ error: 'Database error' });
             }
 
@@ -147,19 +133,13 @@ exports.searchHouseholdsId = async (req, res) => {
                 return res.status(404).json({ message: 'No matching payments found' });
             }
 
-            // Cache the results in Redis with a 5-minute expiration
             await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
-            console.log('💾 Search results cached');
-
-          return  res.json({ message: 'Search results', data: results });
+            return res.json({ message: 'Search results', data: results });
         });
     } catch (error) {
-        console.error('❌ Redis error:', error.message);
         res.status(500).json({ error: 'Server error' });
     }
 };
-
-
 
 // Search households by estate ID and keyword
 exports.searchEstateId = async (req, res) => {
@@ -173,14 +153,11 @@ exports.searchEstateId = async (req, res) => {
     const cacheKey = `payments/:${estate_id}/:${query}`;
 
     try {
-        // Check Redis cache for the search results
         const cachedResults = await redisClient.get(cacheKey);
         if (cachedResults) {
-            console.log('🔁 Serving search results from cache');
             return res.status(200).json(JSON.parse(cachedResults));
         }
 
-        // SQL query to search within the specified estate ID
         const sql = `
             SELECT * FROM payments 
             WHERE estate_id = ? AND (
@@ -193,7 +170,6 @@ exports.searchEstateId = async (req, res) => {
 
         db.query(sql, [estate_id, searchPattern, searchPattern, searchPattern], async (err, results) => {
             if (err) {
-                console.error('Database error: ' + err.message);
                 return res.status(500).json({ error: 'Database error' });
             }
 
@@ -201,41 +177,30 @@ exports.searchEstateId = async (req, res) => {
                 return res.status(404).json({ message: 'No matching payments found' });
             }
 
-            // Cache the results in Redis with a 5-minute expiration
             await redisClient.setEx(cacheKey, 300, JSON.stringify(results));
-            console.log('💾 Search results cached');
-
-          return  res.json(results);
+            return res.json(results);
         });
     } catch (error) {
-        console.error('❌ Redis error:', error.message);
         res.status(500).json({ error: 'Server error' });
     }
 };
 
-
-
-
 ////......Search AllPayments...../////
 exports.searchAllPayments = async (req, res) => {
-    const { query } = req.query; // Retrieve the search query from the client
+    const { query } = req.query;
 
     if (!query) {
         return res.status(400).send("Search query is required");
     }
 
-    // Full-Text Search Query
     const cacheKey = `search:AllPayments:${query}`;
 
     try {
-        // Check Redis cache for the search results
         const cachedResults = await redisClient.get(cacheKey);
         if (cachedResults) {
-            console.log('🔁 Serving search results from cache');
             return res.status(200).json(JSON.parse(cachedResults));
         }
 
-        // Full-Text Search Query (MySQL)
         let sql = `
             SELECT estate_name, transaction_id, transaction_type
             FROM Payments
@@ -243,24 +208,16 @@ exports.searchAllPayments = async (req, res) => {
         `;
         db.query(sql, query, async (err, results) => {
             if (err) {
-                console.error('❌ Error searching AllPayments:', err);
                 return res.status(500).send("Error searching posts");
             }
 
-            // Cache the results in Redis with an expiration of 1 minute
             await redisClient.setEx(cacheKey, 60, JSON.stringify(results));
-            console.log('💾 Search results cached');
-
-           return res.status(200).json(results);
+            return res.status(200).json(results);
         });
     } catch (error) {
-        console.error('❌ Redis error:', error);
-        return  res.status(500).send("Server error");
+        return res.status(500).send("Server error");
     }
-
-
 };
-
 
 // GET /api/payments/summary/:estateId
 exports.getPaymentSummaryByEstate = (req, res) => {
@@ -281,9 +238,114 @@ exports.getPaymentSummaryByEstate = (req, res) => {
 
     db.query(sql, [estateId], (err, results) => {
         if (err) {
-            console.error('❌ Database Error:', err.message);
             return res.status(500).json({ error: 'Failed to retrieve summary' });
         }
         res.status(200).json(results);
     });
+};
+
+// ==========================================
+// NEW: STK PUSH FOR INVOICES & SUBSCRIPTIONS
+// ==========================================
+
+// Note: You will need to import your M-Pesa API service here (e.g., const mpesa = require('../services/mpesa'))
+// Assuming `stkPush` and `stkQuery` are your service functions.
+
+exports.stkPushSubscription = async (req, res) => {
+    const { phone_number, estate_id, invoice_id, amount } = req.body;
+
+    try {
+        // 1. Initiate STK Push with Safaricom (using your existing service)
+        // const mpesaResponse = await mpesa.stkPush(...);
+        
+        // Mock response for this example:
+        const mpesaResponse = {
+            ResponseCode: "0",
+            CheckoutRequestID: "ws_CO_" + Date.now(),
+            MerchantRequestID: "merchant_" + Date.now()
+        };
+
+        if (mpesaResponse.ResponseCode === "0") {
+            // 2. Save the pending push to the database
+            await db.promise().query(
+                `INSERT INTO pending_stk_pushes 
+                   (checkout_request_id, merchant_request_id, household_id, estate_id, phone, amount, invoice_id, status) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+                [
+                    mpesaResponse.CheckoutRequestID, 
+                    mpesaResponse.MerchantRequestID, 
+                    0, // household_id is 0 because this is an estate payment
+                    estate_id, 
+                    phone_number, 
+                    amount || 1000, 
+                    invoice_id || null // <--- Save the invoice ID here
+                ]
+            );
+            
+            return res.json(mpesaResponse);
+        } else {
+            return res.status(400).json(mpesaResponse);
+        }
+    } catch (error) {
+        console.error("STK Push error:", error);
+        return res.status(500).json({ error: "Failed to initiate STK push" });
+    }
+};
+
+exports.mpesaCallback = async (req, res) => {
+    try {
+        const callbackData = req.body.Body.stkCallback;
+        const { CheckoutRequestID, ResultCode, ResultDesc } = callbackData;
+
+        if (ResultCode === 0) {
+            // 1. Find the pending push
+            const [[pending]] = await db.promise().query(
+                `SELECT invoice_id, estate_id, amount FROM pending_stk_pushes WHERE checkout_request_id = ?`,
+                [CheckoutRequestID]
+            );
+
+            if (pending) {
+                const transactionId = callbackData.CallbackMetadata.Item.find(item => item.Name === 'MpesaReceiptNumber')?.Value || CheckoutRequestID;
+
+                // 2. Record it in the general payments table
+                await db.promise().query(
+                    `INSERT INTO payments 
+                       (estate_id, amount_paid, payment_method, payment_status, payment_date, transaction_id) 
+                     VALUES (?, ?, 'M-Pesa', 'Completed', NOW(), ?)`,
+                    [pending.estate_id, pending.amount, transactionId]
+                );
+
+                // 3. If it was for an invoice, update the invoice!
+                if (pending.invoice_id) {
+                    await db.promise().query(
+                        `UPDATE estate_invoices 
+                         SET status = 'Paid', 
+                             paid_at = NOW(), 
+                             paid_amount = ?, 
+                             payment_method = 'M-Pesa', 
+                             transaction_id = ? 
+                         WHERE invoice_id = ?`,
+                        [pending.amount, transactionId, pending.invoice_id]
+                    );
+                }
+
+                // 4. Mark push as completed
+                await db.promise().query(
+                    `UPDATE pending_stk_pushes SET status = 'Completed' WHERE checkout_request_id = ?`,
+                    [CheckoutRequestID]
+                );
+            }
+        } else {
+            await db.promise().query(
+                `UPDATE pending_stk_pushes SET status = 'Failed' WHERE checkout_request_id = ?`,
+                [CheckoutRequestID]
+            );
+        }
+
+        // Always respond with 200 to stop Safaricom retrying
+        res.status(200).json({ ResultCode: 0, ResultDesc: "Success" });
+    } catch (error) {
+        console.error("Callback error:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
 };
