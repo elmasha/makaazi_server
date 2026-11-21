@@ -10,54 +10,61 @@ const app = express();
 // Railway sits behind a proxy — needed for correct IP/protocol detection
 app.set('trust proxy', 1);
 
-// --- CORS: must be the very first middleware ---
+// --- CORS CONFIGURATION ---
 const allowedOrigins = [
   'https://makaazi.netlify.app',
+  'http://localhost:4000',
   'http://localhost:3000',
   'http://127.0.0.1:4000',
-  // add your production frontend origin(s) here, e.g.:
-  // 'https://app.yourdomain.com',
 ];
 
 const corsOptions = {
-  origin: (origin, callback) => {
-    // allow non-browser requests (curl, Postman, server-to-server) with no origin
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, or Postman)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    
+    // Check if the origin is in our allowed list
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('netlify.app')) {
+      callback(null, true);
+    } else {
+      console.error(`🚫 CORS blocked for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   exposedHeaders: ['Content-Length', 'X-Request-Id'],
-  maxAge: 86400, // cache preflight for 24h
+  maxAge: 86400, // Cache preflight for 24 hours
 };
 
+// Apply CORS middleware to ALL routes
 app.use(cors(corsOptions));
-// Explicitly answer preflight for every route (belt-and-braces)
+
+// Explicitly handle preflight OPTIONS requests for all routes
 app.options('*', cors(corsOptions));
 
-// --- Body parsing ---
+// --- BODY PARSING ---
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
-// --- Request logging ---
+// --- REQUEST LOGGING ---
 app.use((req, res, next) => {
   console.log(`Incoming: ${req.method} ${req.originalUrl} | Origin: ${req.headers.origin || 'none'}`);
   next();
 });
 
-// --- Health / test route ---
+// --- HEALTH / TEST ROUTE ---
 app.get('/', (req, res) => {
   res.send('Welcome to Makaazi Estate Management API');
 });
 
-// --- Dev-only routes ---
+// --- DEV ROUTES ---
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/dev', require('./routes/dev'));
 }
 
-// --- Application routes ---
+// --- APPLICATION ROUTES ---
 app.use('/payment/', require('./payments/mpesaStkPush'));
 app.use('/api/roles', require('./routes/roles'));
 app.use('/api/estates', require('./routes/estates'));
@@ -84,27 +91,27 @@ app.use('/api/admin', require('./routes/admin'));
 app.use('/api/vehicles', require('./routes/vehicles'));
 app.use('/api/visitor-passes', require('./routes/visitors'));
 
-// --- 404 handler (still returns CORS headers, so browser shows a real 404, not a CORS error) ---
+// --- 404 HANDLER ---
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.originalUrl });
 });
 
-// --- Global error handler (also preserves CORS headers) ---
+// --- GLOBAL ERROR HANDLER ---
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  if (err.message && err.message.startsWith('CORS blocked')) {
+  if (err.message === 'Not allowed by CORS') {
     return res.status(403).json({ error: err.message });
   }
   res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
 
-// --- Start server ---
+// --- START SERVER ---
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Makaazi Server running on http://localhost:${PORT}`);
 });
 
-// --- Graceful shutdown ---
+// --- GRACEFUL SHUTDOWN ---
 const shutdown = (signal) => {
   console.log(`${signal} received, closing server...`);
   server.close(() => {
@@ -120,13 +127,12 @@ const shutdown = (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// --- Catch crashes so Railway logs them clearly instead of serving a header-less error page ---
+// --- CRASH HANDLING ---
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason);
 });
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
-  // keep process alive briefly so logs flush, then let Railway restart
   setTimeout(() => process.exit(1), 1000);
 });
 
