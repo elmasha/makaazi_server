@@ -249,11 +249,24 @@ exports.getPaymentSummaryByEstate = (req, res) => {
 // ==========================================
 
 exports.stkPushSubscription = async (req, res) => {
-    const { phone_number, estate_id, invoice_id, amount } = req.body;
+    let { phone_number, estate_id, invoice_id, amount } = req.body;
 
     try {
+        // ========================================================
+        // THE FIX: If it's an invoice, fetch the exact amount from DB
+        // ========================================================
+        if (invoice_id) {
+            const [[invoice]] = await db.promise().query(
+                `SELECT amount FROM estate_invoices WHERE invoice_id = ?`,
+                [invoice_id]
+            );
+            if (invoice) {
+                amount = invoice.amount; // Force exact DB amount
+            }
+        }
+
         // 1. Initiate STK Push with Safaricom 
-        // const mpesaResponse = await mpesa.stkPush(...);
+        // const mpesaResponse = await mpesa.stkPush(phone_number, amount, ...);
         
         // Mock response for this example:
         const mpesaResponse = {
@@ -271,11 +284,11 @@ exports.stkPushSubscription = async (req, res) => {
                 [
                     mpesaResponse.CheckoutRequestID, 
                     mpesaResponse.MerchantRequestID, 
-                    0, // household_id is 0 because this is an estate payment
+                    0, 
                     estate_id, 
                     phone_number, 
-                    amount || 1000, 
-                    invoice_id || null // Save the invoice ID here (if paying an invoice)
+                    amount, // Safe, validated amount
+                    invoice_id || null
                 ]
             );
             
