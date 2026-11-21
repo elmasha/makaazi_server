@@ -253,22 +253,25 @@ exports.stkPushSubscription = async (req, res) => {
 
     try {
         // ========================================================
-        // THE FIX: If it's an invoice, fetch the exact amount from DB
+        // THE FIX: Force the amount from the database
         // ========================================================
         if (invoice_id) {
             const [[invoice]] = await db.promise().query(
                 `SELECT amount FROM estate_invoices WHERE invoice_id = ?`,
                 [invoice_id]
             );
+            
             if (invoice) {
-                amount = invoice.amount; // Force exact DB amount
+                amount = invoice.amount; 
+                console.log(`📡 STK Push: Forcing Invoice Amount: ${amount}`);
+            } else {
+                return res.status(404).json({ error: "Invoice not found" });
             }
+        } else {
+            console.log(`📡 STK Push: Subscription Payment Amount: ${amount}`);
         }
 
-        // 1. Initiate STK Push with Safaricom 
-        // const mpesaResponse = await mpesa.stkPush(phone_number, amount, ...);
-        
-        // Mock response for this example:
+        // Mock M-Pesa response
         const mpesaResponse = {
             ResponseCode: "0",
             CheckoutRequestID: "ws_CO_" + Date.now(),
@@ -287,8 +290,8 @@ exports.stkPushSubscription = async (req, res) => {
                     0, 
                     estate_id, 
                     phone_number, 
-                    amount, // Safe, validated amount
-                    invoice_id || null
+                    amount, // Saved as 1000 for invoices
+                    invoice_id || null 
                 ]
             );
             
