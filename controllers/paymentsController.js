@@ -248,14 +248,11 @@ exports.getPaymentSummaryByEstate = (req, res) => {
 // NEW: STK PUSH FOR INVOICES & SUBSCRIPTIONS
 // ==========================================
 
-// Note: You will need to import your M-Pesa API service here (e.g., const mpesa = require('../services/mpesa'))
-// Assuming `stkPush` and `stkQuery` are your service functions.
-
 exports.stkPushSubscription = async (req, res) => {
     const { phone_number, estate_id, invoice_id, amount } = req.body;
 
     try {
-        // 1. Initiate STK Push with Safaricom (using your existing service)
+        // 1. Initiate STK Push with Safaricom 
         // const mpesaResponse = await mpesa.stkPush(...);
         
         // Mock response for this example:
@@ -278,7 +275,7 @@ exports.stkPushSubscription = async (req, res) => {
                     estate_id, 
                     phone_number, 
                     amount || 1000, 
-                    invoice_id || null // <--- Save the invoice ID here
+                    invoice_id || null // Save the invoice ID here (if paying an invoice)
                 ]
             );
             
@@ -305,14 +302,15 @@ exports.mpesaCallback = async (req, res) => {
             );
 
             if (pending) {
+                // Get M-Pesa Receipt Number
                 const transactionId = callbackData.CallbackMetadata.Item.find(item => item.Name === 'MpesaReceiptNumber')?.Value || CheckoutRequestID;
 
                 // 2. Record it in the general payments table
                 await db.promise().query(
                     `INSERT INTO payments 
-                       (estate_id, amount_paid, payment_method, payment_status, payment_date, transaction_id) 
-                     VALUES (?, ?, 'M-Pesa', 'Completed', NOW(), ?)`,
-                    [pending.estate_id, pending.amount, transactionId]
+                       (estate_id, amount_paid, payment_method, payment_status, payment_date, transaction_id, notes) 
+                     VALUES (?, ?, 'M-Pesa', 'Completed', NOW(), ?, ?)`,
+                    [pending.estate_id, pending.amount, transactionId, pending.invoice_id ? `Invoice #${pending.invoice_id}` : 'Subscription']
                 );
 
                 // 3. If it was for an invoice, update the invoice!
@@ -327,15 +325,41 @@ exports.mpesaCallback = async (req, res) => {
                          WHERE invoice_id = ?`,
                         [pending.amount, transactionId, pending.invoice_id]
                     );
+                } 
+                // 4. If it was NOT an invoice, it's a subscription payment. Update the subscription!
+                else {
+                    // Find their current plan, or default to plan 1
+                    const [[currentSub]] = await db.promise().query(
+                        `SELECT plan_id FROM estate_subscriptions WHERE estate_id = ? LIMIT 1`,
+                        [pending.estate_id]
+                    );
+                    const planId = currentSub ? currentSub.plan_id : 1;
+
+                    // Upsert the subscription: Mark Paid, Active, and extend for 30 days
+                    await db.promise().query(
+                        `INSERT INTO estate_subscriptions 
+                           (estate_id, plan_id, start_date, end_date, amount_paid, payment_status, payment_method, transaction_id, is_active) 
+                         VALUES (?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 30 DAY), ?, 'Paid', 'M-Pesa', ?, 1)
+                         ON DUPLICATE KEY UPDATE 
+                           start_date = NOW(),
+                           end_date = DATE_ADD(NOW(), INTERVAL 30 DAY),
+                           amount_paid = VALUES(amount_paid),
+                           payment_status = 'Paid',
+                           payment_method = 'M-Pesa',
+                           transaction_id = VALUES(transaction_id),
+                           is_active = 1`,
+                        [pending.estate_id, planId, pending.amount, transactionId]
+                    );
                 }
 
-                // 4. Mark push as completed
+                // 5. Mark push as completed
                 await db.promise().query(
                     `UPDATE pending_stk_pushes SET status = 'Completed' WHERE checkout_request_id = ?`,
                     [CheckoutRequestID]
                 );
             }
         } else {
+            // Payment failed
             await db.promise().query(
                 `UPDATE pending_stk_pushes SET status = 'Failed' WHERE checkout_request_id = ?`,
                 [CheckoutRequestID]
