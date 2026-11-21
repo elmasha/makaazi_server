@@ -11,7 +11,7 @@ const { notifyEstateTreasurer } = require('../services/estateNotifications');
 // ============================================================
 // CONFIG
 // ============================================================
-const BASE_URL = process.env.BASE_URL || 'https://makaaziserver22.up.railway.app';
+const BASE_URL = process.env.BASE_URL || 'https://makaaziserver-production.up.railway.app';
 const SHORT_CODE = process.env.MPESA_SHORTCODE || '174379';
 const PASS_KEY =
   process.env.MPESA_PASSKEY ||
