@@ -101,6 +101,471 @@ exports.adminLogin = async (req, res) => {
   });
 };
 
+
+
+
+// ============================================================
+// ADMIN: ESTATE INVOICES  (KES-only, production-safe)
+// ============================================================
+
+const INVOICE_CURRENCY   = 'KES';   // ← single source of truth
+const INVOICE_TYPES      = ['Subscription', 'ServiceCharge', 'AdHoc'];
+const MUTABLE_STATUSES   = ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled'];
+
+// ── Race-free invoice number via a dedicated sequence table ──
+async function generateInvoiceNumber(connection) {
+  const year = new Date().getFullYear();
+
+  await connection.query(
+    `INSERT INTO invoice_sequences (year, last_number) VALUES (?, 1)
+     ON DUPLICATE KEY UPDATE last_number = last_number + 1`,
+    [year]
+  );
+
+  const [[row]] = await connection.query(
+    `SELECT last_number FROM invoice_sequences WHERE year = ?`,
+    [year]
+  );
+
+  return `INV-${year}-${String(row.last_number).padStart(5, '0')}`;
+}
+
+// ── Ledger sync: paid invoice also writes to payments ──
+async function recordInvoicePayment(connection, invoice, paidAmount, method, txnId) {
+  await connection.query(
+    `INSERT INTO payments
+       (estate_id, household_id, amount_paid, payment_method,
+        payment_status, payment_date, transaction_id, notes)
+     VALUES (?, NULL, ?, ?, 'Completed', NOW(), ?, ?)`,
+    [
+      invoice.estate_id,
+      paidAmount,
+      method || 'Manual',
+      txnId || null,
+      `Invoice ${invoice.invoice_number}`,
+    ]
+  );
+}
+
+// ============================================================
+// GET /api/admin/estates/:id/invoices
+// ============================================================
+exports.listEstateInvoices = async (req, res) => {
+  const { id } = req.params;
+  const { status, from, to } = req.query;
+
+  try {
+    let sql = `
+      SELECT invoice_id, estate_id, invoice_number, title, description,
+             amount, currency, due_date, status, paid_at, paid_amount,
+             payment_method, transaction_id, invoice_type,
+             created_by_admin, created_at, updated_at
+      FROM estate_invoices
+      WHERE estate_id = ?
+    `;
+    const params = [id];
+
+    if (status) { sql += ` AND status = ?`; params.push(status); }
+    if (from)   { sql += ` AND due_date >= ?`; params.push(from); }
+    if (to)     { sql += ` AND due_date <= ?`; params.push(to); }
+
+    sql += ` ORDER BY created_at DESC`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listEstateInvoices error:', err.message);
+    return res.status(500).json({ error: 'Failed to list invoices' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/invoices
+// ============================================================
+exports.listAllInvoices = async (req, res) => {
+  const { status, estate_id, search } = req.query;
+
+  try {
+    let sql = `
+      SELECT i.*, e.estate_name, e.estate_urn
+      FROM estate_invoices i
+      LEFT JOIN estates e ON e.estate_id = i.estate_id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (status)    { sql += ` AND i.status = ?`;    params.push(status); }
+    if (estate_id) { sql += ` AND i.estate_id = ?`; params.push(estate_id); }
+    if (search) {
+      sql += ` AND (i.invoice_number LIKE ? OR i.title LIKE ?
+                   OR e.estate_name LIKE ? OR e.estate_urn LIKE ?)`;
+      const p = `%${search}%`;
+      params.push(p, p, p, p);
+    }
+
+    sql += ` ORDER BY i.created_at DESC LIMIT 500`;
+
+    const [rows] = await db.promise().query(sql, params);
+    return res.json(rows);
+  } catch (err) {
+    console.error('listAllInvoices error:', err.message);
+    return res.status(500).json({ error: 'Failed to list invoices' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/estates/:id/invoices
+// Body: { title, description?, amount, due_date, invoice_type?, status? }
+// Currency is ALWAYS KES — any incoming `currency` field is ignored.
+// ============================================================
+exports.createEstateInvoice = async (req, res) => {
+  const { id } = req.params;
+  const {
+    title,
+    description = null,
+    amount,
+    due_date,
+    invoice_type = 'AdHoc',
+    status = 'Draft',
+  } = req.body;
+
+  // ── Validation ──
+  if (!title || amount == null || !due_date) {
+    return res.status(400).json({
+      error: 'title, amount and due_date are required',
+    });
+  }
+  if (!INVOICE_TYPES.includes(invoice_type)) {
+    return res.status(400).json({ error: 'Invalid invoice_type' });
+  }
+  if (!['Draft', 'Sent'].includes(status)) {
+    return res.status(400).json({ error: 'status must be Draft or Sent' });
+  }
+  if (Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number' });
+  }
+
+  const connection = await db.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [[estate]] = await connection.query(
+      `SELECT estate_id, estate_name FROM estates WHERE estate_id = ? FOR UPDATE`,
+      [id]
+    );
+    if (!estate) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Estate not found' });
+    }
+
+    const invoice_number = await generateInvoiceNumber(connection);
+
+    const [result] = await connection.query(
+      `INSERT INTO estate_invoices
+         (estate_id, invoice_number, title, description, amount, currency,
+          due_date, status, invoice_type, created_by_admin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        invoice_number,
+        title,
+        description,
+        Number(amount),
+        INVOICE_CURRENCY,          // ← always KES
+        due_date,
+        status,
+        invoice_type,
+        req.admin?.email || null,
+      ]
+    );
+
+    await connection.commit();
+
+    await logAdminAction(req.admin?.email, 'create_invoice', 'estate', Number(id), {
+      invoice_id: result.insertId,
+      invoice_number,
+      title,
+      amount: Number(amount),
+      due_date,
+      invoice_type,
+      currency: INVOICE_CURRENCY,
+    });
+
+    return res.status(201).json({
+      message: 'Invoice created',
+      invoice_id: result.insertId,
+      invoice_number,
+      currency: INVOICE_CURRENCY,
+    });
+  } catch (err) {
+    await connection.rollback();
+    console.error('createEstateInvoice error:', err.message);
+
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        error: 'Invoice number collision — please retry',
+      });
+    }
+    return res.status(500).json({ error: 'Failed to create invoice' });
+  } finally {
+    connection.release();
+  }
+};
+
+// ============================================================
+// PATCH /api/admin/invoices/:invoiceId
+// Currency is not mutable — locked to KES at creation.
+// ============================================================
+exports.updateInvoice = async (req, res) => {
+  const { invoiceId } = req.params;
+  const allowed = ['title', 'description', 'amount', 'due_date', 'status'];
+  const updates = {};
+
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) updates[k] = req.body[k];
+  }
+
+  if (updates.status && !MUTABLE_STATUSES.includes(updates.status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  if (updates.amount !== undefined) {
+    updates.amount = Number(updates.amount);
+    if (Number.isNaN(updates.amount) || updates.amount <= 0) {
+      return res.status(400).json({ error: 'amount must be a positive number' });
+    }
+  }
+
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+
+  try {
+    const [[existing]] = await db.promise().query(
+      `SELECT status FROM estate_invoices WHERE invoice_id = ?`,
+      [invoiceId]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    // 🔒 Paid invoices are immutable except for description / title
+    if (existing.status === 'Paid') {
+      const forbidden = ['amount', 'status', 'due_date']
+        .filter((k) => updates[k] !== undefined);
+      if (forbidden.length) {
+        return res.status(400).json({
+          error: `Cannot modify ${forbidden.join(', ')} on a paid invoice`,
+        });
+      }
+    }
+
+    const setters = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+    const values = [...Object.values(updates), invoiceId];
+
+    const [r] = await db.promise().query(
+      `UPDATE estate_invoices SET ${setters} WHERE invoice_id = ?`,
+      values
+    );
+    if (!r.affectedRows) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    await logAdminAction(req.admin?.email, 'update_invoice', 'invoice', Number(invoiceId), updates);
+    return res.json({ message: 'Invoice updated' });
+  } catch (err) {
+    console.error('updateInvoice error:', err.message);
+    return res.status(500).json({ error: 'Failed to update invoice' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/invoices/:invoiceId/mark-paid
+// Writes to payments ledger in the same transaction (KES).
+// ============================================================
+exports.markInvoicePaid = async (req, res) => {
+  const { invoiceId } = req.params;
+  const { paid_amount, payment_method, transaction_id = null } = req.body;
+
+  if (paid_amount == null) {
+    return res.status(400).json({ error: 'paid_amount is required' });
+  }
+  if (Number.isNaN(Number(paid_amount)) || Number(paid_amount) <= 0) {
+    return res.status(400).json({ error: 'paid_amount must be a positive number' });
+  }
+
+  const connection = await db.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [[invoice]] = await connection.query(
+      `SELECT invoice_id, estate_id, invoice_number, amount, status
+       FROM estate_invoices
+       WHERE invoice_id = ? FOR UPDATE`,
+      [invoiceId]
+    );
+
+    if (!invoice) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+    if (invoice.status === 'Paid') {
+      await connection.rollback();
+      return res.status(400).json({ error: 'Invoice is already marked as paid' });
+    }
+    if (invoice.status === 'Cancelled') {
+      await connection.rollback();
+      return res.status(400).json({ error: 'Cannot pay a cancelled invoice' });
+    }
+
+    await connection.query(
+      `UPDATE estate_invoices
+       SET status = 'Paid', paid_at = NOW(),
+           paid_amount = ?, payment_method = ?, transaction_id = ?
+       WHERE invoice_id = ?`,
+      [Number(paid_amount), payment_method || 'Manual', transaction_id, invoiceId]
+    );
+
+    await recordInvoicePayment(
+      connection,
+      invoice,
+      Number(paid_amount),
+      payment_method,
+      transaction_id
+    );
+
+    await connection.commit();
+
+    await logAdminAction(req.admin?.email, 'mark_invoice_paid', 'invoice', Number(invoiceId), {
+      invoice_number: invoice.invoice_number,
+      paid_amount: Number(paid_amount),
+      payment_method,
+      transaction_id,
+    });
+
+    return res.json({ message: 'Invoice marked as paid' });
+  } catch (err) {
+    await connection.rollback();
+    console.error('markInvoicePaid error:', err.message);
+    return res.status(500).json({ error: 'Failed to mark invoice paid' });
+  } finally {
+    connection.release();
+  }
+};
+
+// ============================================================
+// POST /api/admin/invoices/:invoiceId/send
+// ============================================================
+exports.sendInvoice = async (req, res) => {
+  const { invoiceId } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE estate_invoices SET status = 'Sent'
+       WHERE invoice_id = ? AND status = 'Draft'`,
+      [invoiceId]
+    );
+    if (!r.affectedRows) {
+      return res.status(400).json({
+        error: 'Invoice not found or not in Draft status',
+      });
+    }
+
+    await logAdminAction(req.admin?.email, 'send_invoice', 'invoice', Number(invoiceId), null);
+    return res.json({ message: 'Invoice sent' });
+  } catch (err) {
+    console.error('sendInvoice error:', err.message);
+    return res.status(500).json({ error: 'Failed to send invoice' });
+  }
+};
+
+// ============================================================
+// POST /api/admin/invoices/:invoiceId/cancel
+// ============================================================
+exports.cancelInvoice = async (req, res) => {
+  const { invoiceId } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `UPDATE estate_invoices SET status = 'Cancelled'
+       WHERE invoice_id = ? AND status IN ('Draft','Sent','Overdue')`,
+      [invoiceId]
+    );
+    if (!r.affectedRows) {
+      return res.status(400).json({ error: 'Invoice cannot be cancelled' });
+    }
+    await logAdminAction(req.admin?.email, 'cancel_invoice', 'invoice', Number(invoiceId), null);
+    return res.json({ message: 'Invoice cancelled' });
+  } catch (err) {
+    console.error('cancelInvoice error:', err.message);
+    return res.status(500).json({ error: 'Failed to cancel invoice' });
+  }
+};
+
+// ============================================================
+// DELETE /api/admin/invoices/:invoiceId
+// ============================================================
+exports.deleteInvoice = async (req, res) => {
+  const { invoiceId } = req.params;
+  try {
+    const [r] = await db.promise().query(
+      `DELETE FROM estate_invoices WHERE invoice_id = ? AND status != 'Paid'`,
+      [invoiceId]
+    );
+    if (!r.affectedRows) {
+      return res.status(400).json({
+        error: 'Cannot delete (not found or already paid)',
+      });
+    }
+    await logAdminAction(req.admin?.email, 'delete_invoice', 'invoice', Number(invoiceId), null);
+    return res.json({ message: 'Invoice deleted' });
+  } catch (err) {
+    console.error('deleteInvoice error:', err.message);
+    return res.status(500).json({ error: 'Failed to delete invoice' });
+  }
+};
+
+// ============================================================
+// GET /api/admin/invoice-stats
+// Supports ?estate_id= for per-estate KPIs.
+// ============================================================
+exports.getInvoiceStats = async (req, res) => {
+  const { estate_id } = req.query;
+
+  try {
+    let where = '';
+    const params = [];
+    if (estate_id) {
+      where = ' WHERE estate_id = ?';
+      params.push(estate_id);
+    }
+
+    const [[stats]] = await db.promise().query(
+      `SELECT
+         COUNT(*)                                                   AS total_invoices,
+         SUM(CASE WHEN status = 'Draft'    THEN 1 ELSE 0 END)       AS drafts,
+         SUM(CASE WHEN status = 'Sent'     THEN 1 ELSE 0 END)       AS sent,
+         SUM(CASE WHEN status = 'Overdue'  THEN 1 ELSE 0 END)       AS overdue,
+         SUM(CASE WHEN status = 'Paid'     THEN 1 ELSE 0 END)       AS paid,
+         SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END)      AS cancelled,
+         COALESCE(SUM(CASE WHEN status IN ('Sent','Overdue') THEN amount ELSE 0 END), 0) AS outstanding_amount,
+         COALESCE(SUM(CASE WHEN status = 'Paid' THEN paid_amount ELSE 0 END), 0)         AS collected_amount
+       FROM estate_invoices${where}`,
+      params
+    );
+
+    return res.json({
+      total_invoices:     Number(stats.total_invoices || 0),
+      drafts:             Number(stats.drafts || 0),
+      sent:               Number(stats.sent || 0),
+      overdue:            Number(stats.overdue || 0),
+      paid:               Number(stats.paid || 0),
+      cancelled:          Number(stats.cancelled || 0),
+      outstanding_amount: Number(stats.outstanding_amount || 0),
+      collected_amount:   Number(stats.collected_amount || 0),
+    });
+  } catch (err) {
+    console.error('getInvoiceStats error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch invoice stats' });
+  }
+};
 // ============================================================
 // GET /api/admin/me
 // ============================================================

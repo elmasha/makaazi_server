@@ -237,6 +237,24 @@ router.post('/estates/:id/sections', ctrl.addSection);
 router.post('/estates/:id/courts',   ctrl.addCourt);
 router.post('/estates/:id/streets',  ctrl.addStreet);
 
+
+// Platform-wide invoice views
+router.get('/invoices',            ctrl.listAllInvoices);
+router.get('/invoice-stats',       ctrl.getInvoiceStats);
+
+// Per-estate invoices
+router.get('/estates/:id/invoices',    ctrl.listEstateInvoices);
+router.post('/estates/:id/invoices',   ctrl.createEstateInvoice);
+
+// Single-invoice actions
+router.patch('/invoices/:invoiceId',           ctrl.updateInvoice);
+router.post('/invoices/:invoiceId/send',       ctrl.sendInvoice);
+router.post('/invoices/:invoiceId/mark-paid',  ctrl.markInvoicePaid);
+router.post('/invoices/:invoiceId/cancel',     ctrl.cancelInvoice);
+router.delete('/invoices/:invoiceId',          ctrl.deleteInvoice);
+
+
+
 router.post(
   '/estates/:id/first-official',
   requireRole('super', 'support'),
