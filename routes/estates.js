@@ -80,4 +80,35 @@ router.get('/subscription-plans', async (req, res) => {
   }
 });
 
+
+// ============================================================
+// ESTATE INVOICES
+// ============================================================
+
+router.get('/estates/:estateId/invoices', async (req, res) => {
+  const { estateId } = req.params;
+
+  // Note: If you have auth middleware (like estateAuth), add it here:
+  // (e.g., router.get('/estates/:estateId/invoices', estateAuth, async ...)
+  // and check if req.user.estate_id === estateId
+
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT invoice_id, invoice_number, title, description,
+              amount, currency, due_date, status, paid_at, paid_amount,
+              payment_method, transaction_id, invoice_type,
+              created_at
+       FROM estate_invoices
+       WHERE estate_id = ? 
+       ORDER BY created_at DESC`,
+      [estateId]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('estate invoices fetch error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch invoices' });
+  }
+});
+
 module.exports = router;
